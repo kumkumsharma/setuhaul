@@ -172,3 +172,23 @@ class ChatResponse(BaseModel):
     needs_shipment_choice: list[ShipmentOut] = Field(default_factory=list)
     escalated: bool = False
     tools_used: list[str] = Field(default_factory=list)
+    # Phase 2 additive fields
+    client_action: Optional[str] = None  # e.g. REQUEST_BROWSER_LOCATION
+    eta_comparison: Optional[dict[str, Any]] = None
+    waiting_for_browser: bool = False
+
+
+class LocationSubmitOut(BaseModel):
+    exception_id: str
+    reply: str
+    eta_comparison: Optional[dict[str, Any]] = None
+
+
+class ScheduleRunOut(BaseModel):
+    run_id: str
+    facility_id: str
+    created_at: datetime
+    objective: str
+    proposal: dict[str, Any]
+    explanation: str
+    input_snapshot: dict[str, Any] = Field(default_factory=dict)

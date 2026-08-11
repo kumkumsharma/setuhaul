@@ -14,6 +14,7 @@ from app.db import Base, SessionLocal, engine, init_db
 from app.models import (
     Appointment,
     AppointmentSlot,
+    BaselineMetric,
     Contact,
     Dock,
     Driver,
@@ -578,6 +579,19 @@ def seed(db: Session | None = None) -> None:
             email="planner.jpr@setuhaul.example",
             phone="+911412000001",
             facility_id="FAC-JPR-01",
+        )
+    )
+
+    # Phase 2 — manual-process baseline for before/after demo (Advanced PDF examples)
+    db.add(
+        BaselineMetric(
+            baseline_id="BASE-MANUAL-1",
+            label="manual_coordinator",
+            avg_resolution_minutes=18.0,
+            human_help_rate=0.7,
+            avg_eta_error_minutes=29.0,
+            sample_size=10,
+            notes="Classroom baseline for similar evening delay cases before the solution.",
         )
     )
 

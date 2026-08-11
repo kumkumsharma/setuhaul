@@ -211,6 +211,60 @@ button:disabled {
   padding: 0 12px 12px;
 }
 
+.location-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: #f7f3ea;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.tab {
+  background: transparent;
+  color: var(--ink);
+}
+
+.tab.active {
+  background: var(--ink);
+  color: #fff;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.eta-box,
+.schedule-out,
+.metrics-grid {
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.block {
+  white-space: pre-wrap;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+}
+
 .quick button {
   font-size: 0.8rem;
   padding: 6px 8px;

@@ -249,3 +249,89 @@ class Contact(Base):
     phone: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     facility_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     shipment_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+
+# --- Phase 2 models (additive) ---
+
+
+class LocationShare(Base):
+    """One-time browser location snapshot during an exception conversation."""
+
+    __tablename__ = "location_shares"
+
+    location_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exception_id: Mapped[str] = mapped_column(ForeignKey("driver_exceptions.exception_id"))
+    shipment_id: Mapped[str] = mapped_column(ForeignKey("shipments.shipment_id"))
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    accuracy_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), default="ok")  # ok|denied|error|stale
+
+
+class RouteEtaRecord(Base):
+    """Route-based ETA kept separate from driver-declared ETA."""
+
+    __tablename__ = "route_etas"
+
+    route_eta_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exception_id: Mapped[str] = mapped_column(ForeignKey("driver_exceptions.exception_id"))
+    shipment_id: Mapped[str] = mapped_column(ForeignKey("shipments.shipment_id"))
+    location_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    provider: Mapped[str] = mapped_column(String(64))  # geoapify | mock
+    distance_km: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    duration_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    route_eta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_for_scheduling: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class SchedulingRun(Base):
+    """Facility-level scheduling tool snapshot (optional engine)."""
+
+    __tablename__ = "scheduling_runs"
+
+    run_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    facility_id: Mapped[str] = mapped_column(ForeignKey("facilities.facility_id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    objective: Mapped[str] = mapped_column(String(120))
+    input_snapshot_json: Mapped[str] = mapped_column(Text)
+    proposal_json: Mapped[str] = mapped_column(Text)
+    explanation: Mapped[str] = mapped_column(Text)
+
+
+class CaseMetric(Base):
+    """Per-exception operational metrics for before/after comparison."""
+
+    __tablename__ = "case_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exception_id: Mapped[str] = mapped_column(ForeignKey("driver_exceptions.exception_id"), unique=True)
+    shipment_id: Mapped[str] = mapped_column(String(32))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    options_generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_status: Mapped[str] = mapped_column(String(32), default="open")
+    # confirmed | escalated | open
+    human_intervention: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_option_accepted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    eta_source_used: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    predicted_eta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    actual_gate_in: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    old_projected_wait_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    new_projected_wait_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
+class BaselineMetric(Base):
+    """Seeded manual-process baseline for before/after demo comparisons."""
+
+    __tablename__ = "baseline_metrics"
+
+    baseline_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    label: Mapped[str] = mapped_column(String(64))
+    avg_resolution_minutes: Mapped[float] = mapped_column(Float)
+    human_help_rate: Mapped[float] = mapped_column(Float)
+    avg_eta_error_minutes: Mapped[float] = mapped_column(Float)
+    sample_size: Mapped[int] = mapped_column(Integer)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

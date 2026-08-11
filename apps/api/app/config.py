@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     api_port: int = 8000
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # Phase 2 — location / Geoapify
+    geoapify_api_key: str = ""
+    geoapify_mock: bool = True
+    location_stale_minutes: int = 30
+    truck_speed_kmh: float = 45.0
+
+    # Phase 2 — optional observability (no-op unless configured)
+    langsmith_api_key: str = ""
+    langsmith_project: str = "setuhaul-fde"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

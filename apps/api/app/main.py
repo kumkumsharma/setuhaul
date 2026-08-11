@@ -32,9 +32,15 @@ def create_app() -> FastAPI:
     app.include_router(allocation.router)
     app.include_router(chat.router)
 
+    from app.api import location, metrics, scheduling
+
+    app.include_router(location.router)
+    app.include_router(scheduling.router)
+    app.include_router(metrics.router)
+
     @app.get("/health")
     def health():
-        return {"status": "ok", "scenario_now": settings.scenario_now}
+        return {"status": "ok", "scenario_now": settings.scenario_now, "phase": 2}
 
     return app
 

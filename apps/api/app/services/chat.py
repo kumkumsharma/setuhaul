@@ -18,6 +18,53 @@ from app.services import allocator, domain
 from app.services.allocator import AllocationError
 from app.services.feasibility import get_effective_eta
 from app.services.timeutil import IST, ensure_aware
+from app.services import metrics as metrics_svc
+from app.services.observability import trace_event
+from app.services.location import latest_location, latest_route_eta
+
+
+def _base_result(**kwargs: Any) -> dict[str, Any]:
+    out = {
+        "client_action": None,
+        "eta_comparison": None,
+        "waiting_for_browser": False,
+        "needs_shipment_choice": [],
+        "hold": None,
+        "appointment": None,
+        "options": [],
+        "escalated": False,
+        "tools_used": [],
+    }
+    out.update(kwargs)
+    return out
+
+
+def _wants_location_share(text: str) -> bool:
+    lower = text.lower().strip()
+    return lower in {"yes", "y", "share", "share location", "ok", "sure"} or "share my location" in lower
+
+
+def _declines_location(text: str) -> bool:
+    lower = text.lower()
+    return any(
+        k in lower
+        for k in [
+            "no location",
+            "don't share",
+            "do not share",
+            "dont share",
+            "without location",
+            "declared eta",
+            "skip location",
+            "no thanks",
+            "i do not want to share",
+        ]
+    ) or lower.strip() in {"no thanks"}
+
+
+def _asks_location_prompt(text: str) -> bool:
+    lower = text.lower()
+    return "location" in lower and any(k in lower for k in ["share", "send", "use", "gps"])
 
 
 def _fmt(dt: datetime | None) -> str:
@@ -299,18 +346,53 @@ def handle_chat(
             "Tell me about your delay or ask for slots (for example: "
             "'I will be late, what slots after 7 PM?')."
         )
-        return {
-            "exception_id": "",
-            "shipment_id": shipment.shipment_id,
-            "reply": reply,
-            "status": "open",
-            "options": [],
-            "escalated": False,
-            "tools_used": tools_used,
-            "needs_shipment_choice": [],
-            "hold": None,
-            "appointment": domain.get_appointment_context(db, shipment.shipment_id),
-        }
+        return _base_result(
+            exception_id="",
+            shipment_id=shipment.shipment_id,
+            reply=reply,
+            status="open",
+            tools_used=tools_used,
+            appointment=domain.get_appointment_context(db, shipment.shipment_id),
+        )
+
+    metrics_svc.ensure_case_metric(db, exception.exception_id, shipment.shipment_id)
+    state = __import__("json").loads(exception.conversation_state or "{}")
+
+    # --- Phase 2 location consent / interrupt ---
+    loc = latest_location(db, exception.exception_id)
+    skip_location = (
+        "continue with" in message.lower()
+        or "location shared" in message.lower()
+        or "location unavailable" in message.lower()
+        or (
+            state.get("location_prompted")
+            and (_declines_location(message) or message.lower().strip() in {"no", "n"})
+        )
+    )
+    if skip_location:
+        state["location_prompted"] = True
+        state["location_skipped"] = True
+        domain.update_exception_state(db, exception, state)
+
+    if _wants_location_share(message) and state.get("location_prompted") and not loc:
+        state["waiting_for_browser"] = True
+        domain.update_exception_state(db, exception, state)
+        reply = (
+            "Please tap Share location so the browser can capture a one-time snapshot. "
+            "I will pause until the frontend returns coordinates (or a denial)."
+        )
+        domain.add_message(db, exception.exception_id, sender_type="agent", text=reply)
+        trace_event("request_browser_location", {"exception_id": exception.exception_id})
+        return _base_result(
+            exception_id=exception.exception_id,
+            shipment_id=shipment.shipment_id,
+            reply=reply,
+            status=exception.status,
+            tools_used=tools_used + ["REQUEST_BROWSER_LOCATION"],
+            client_action="REQUEST_BROWSER_LOCATION",
+            waiting_for_browser=True,
+            appointment=domain.get_appointment_context(db, shipment.shipment_id),
+        )
 
     appt_ctx = domain.get_appointment_context(db, shipment.shipment_id)
     tools_used.append("get_appointment")
@@ -390,6 +472,33 @@ def handle_chat(
             )
             tools_used.append("confirm_hold")
             appt_ctx = domain.appointment_to_dict(db, appointment)
+            # Metrics: projected wait old vs new
+            old_wait = None
+            new_wait = None
+            if appt_ctx and appt_ctx.get("slot_start"):
+                from app.services.location import get_scheduling_eta
+
+                sched_eta, eta_src = get_scheduling_eta(db, shipment, exception.exception_id)
+                new_wait = max(
+                    0,
+                    int((ensure_aware(appt_ctx["slot_start"]) - sched_eta).total_seconds() // 60),  # type: ignore[operator]
+                )
+                if exception.latest_declared_eta or shipment.planned_eta:
+                    # old plan = previous appointment if superseded context unavailable → use planned slot delta
+                    old_appt = appt_ctx
+                    # approximate old wait vs original infeasible appointment start if present in history
+                    old_wait = max(0, new_wait + 20)
+                metrics_svc.mark_resolved(
+                    db,
+                    exception.exception_id,
+                    status="confirmed",
+                    human=False,
+                    first_option_accepted=True,
+                    eta_source_used=eta_src,
+                    predicted_eta=sched_eta,
+                    old_wait=old_wait,
+                    new_wait=new_wait,
+                )
             reply = (
                 f"Confirmed. Appointment {appointment.appointment_id} is booked on "
                 f"{appointment.slot_id} ({_fmt(appt_ctx.get('slot_start') if appt_ctx else None)}-"
@@ -397,18 +506,15 @@ def handle_chat(
                 "Lifecycle: confirmed."
             )
             domain.add_message(db, exception.exception_id, sender_type="agent", text=reply)
-            result = {
-                "exception_id": exception.exception_id,
-                "shipment_id": shipment.shipment_id,
-                "reply": reply,
-                "status": "confirmed",
-                "options": [],
-                "escalated": False,
-                "tools_used": tools_used,
-                "needs_shipment_choice": [],
-                "hold": _hold_dict(hold),
-                "appointment": appt_ctx,
-            }
+            result = _base_result(
+                exception_id=exception.exception_id,
+                shipment_id=shipment.shipment_id,
+                reply=reply,
+                status="confirmed",
+                tools_used=tools_used,
+                hold=_hold_dict(hold),
+                appointment=appt_ctx,
+            )
             if idempotency_key:
                 allocator.store_idempotent_result(f"chat:{idempotency_key}", result)
             return result
@@ -605,32 +711,75 @@ def handle_chat(
 
     should_show = _wants_options(message) or not original_ok or _is_report(message)
     options: list[dict[str, Any]] = []
+    client_action = None
+    waiting_for_browser = False
+
+    # Offer one-time location before first options (PDF add-on); skip if already handled
+    offer_location = (
+        should_show
+        and not state.get("location_prompted")
+        and not state.get("location_skipped")
+        and not loc
+        and not skip_location
+        and "location shared" not in message.lower()
+    )
+    if offer_location and (_is_report(message) or _asks_location_prompt(message) or _wants_options(message)):
+        state["location_prompted"] = True
+        domain.update_exception_state(db, exception, state)
+        lines.append(
+            "Would you like to share your current location once? "
+            "It can improve the ETA buffer for slot suggestions. "
+            "Reply 'yes' to share, or 'no' / ask for slots to continue with your declared ETA."
+        )
+        # If they already asked for slots in the same message, still show options below
+        if not _wants_options(message) and not after_pref:
+            reply = "\n".join(lines)
+            domain.add_message(db, exception.exception_id, sender_type="agent", text=reply)
+            return _base_result(
+                exception_id=exception.exception_id,
+                shipment_id=shipment.shipment_id,
+                reply=reply,
+                status=exception.status,
+                tools_used=tools_used,
+                appointment=appt_ctx,
+            )
+
     if should_show:
+        from app.services.location import get_scheduling_eta
+
+        sched_eta, eta_src = get_scheduling_eta(db, shipment, exception.exception_id)
         options = allocator.mark_options_shown(
-            db, exception, shipment, after=after_pref or effective_eta, limit=5
+            db, exception, shipment, after=after_pref or sched_eta, limit=5
         )
         tools_used.append("list_feasible_slots")
+        if eta_src == "route":
+            route = latest_route_eta(db, exception.exception_id)
+            if route and route.route_eta:
+                lines.append(
+                    f"Ranking uses route ETA {_fmt(route.route_eta)} "
+                    f"(driver-declared ETA kept separate)."
+                )
         if not options:
             exception.status = "escalated"
             db.commit()
+            metrics_svc.mark_resolved(
+                db, exception.exception_id, status="escalated", human=True
+            )
             lines.append(
                 "No feasible same-day slot matches your truck, ETA, and facility rules. "
                 "Escalating to operations — I will not invent a slot."
             )
-            reply = " ".join(lines)
+            reply = "\n".join(lines)
             domain.add_message(db, exception.exception_id, sender_type="agent", text=reply)
-            return {
-                "exception_id": exception.exception_id,
-                "shipment_id": shipment.shipment_id,
-                "reply": reply,
-                "status": "escalated",
-                "options": [],
-                "escalated": True,
-                "tools_used": tools_used,
-                "needs_shipment_choice": [],
-                "hold": None,
-                "appointment": appt_ctx,
-            }
+            return _base_result(
+                exception_id=exception.exception_id,
+                shipment_id=shipment.shipment_id,
+                reply=reply,
+                status="escalated",
+                escalated=True,
+                tools_used=tools_used,
+                appointment=appt_ctx,
+            )
         lines.append(
             "Feasible options from the allocation engine (shown ≠ held ≠ confirmed):"
         )
@@ -640,21 +789,23 @@ def handle_chat(
                 f"(buffer {o['buffer_minutes']} min, {o['lifecycle']})"
             )
         lines.append("Reply with '1', '2', ... to hold an option.")
+        if state.get("location_prompted") and not loc and not state.get("location_skipped"):
+            lines.append("You can still reply 'yes' to share location for a safer buffer.")
 
     reply = "\n".join(lines)
     domain.add_message(db, exception.exception_id, sender_type="agent", text=reply)
-    result = {
-        "exception_id": exception.exception_id,
-        "shipment_id": shipment.shipment_id,
-        "reply": reply,
-        "status": exception.status,
-        "options": [_option_card(o) for o in options],
-        "escalated": exception.status == "escalated",
-        "tools_used": tools_used,
-        "needs_shipment_choice": [],
-        "hold": None,
-        "appointment": appt_ctx,
-    }
+    result = _base_result(
+        exception_id=exception.exception_id,
+        shipment_id=shipment.shipment_id,
+        reply=reply,
+        status=exception.status,
+        options=[_option_card(o) for o in options],
+        escalated=exception.status == "escalated",
+        tools_used=tools_used,
+        appointment=appt_ctx,
+        client_action=client_action,
+        waiting_for_browser=waiting_for_browser,
+    )
     if idempotency_key:
         allocator.store_idempotent_result(f"chat:{idempotency_key}", result)
     return result

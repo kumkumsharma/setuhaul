@@ -51,6 +51,16 @@ export PYTHONPATH=apps/api
 pytest -q
 ```
 
-## Out of scope for Phase 1
+## Phase 2 (location, scheduling, metrics)
 
-Location / Geoapify, facility-wide scheduler, LangSmith/metrics dashboards (Phase 2+).
+Additive APIs (Phase 1 unchanged as capacity truth):
+
+- `POST /api/location` / `POST /api/location/decline` — one-time browser location + Geoapify/mock route ETA
+- `POST /api/scheduling/facilities/{id}/run` — facility-level rule-based schedule proposal
+- `GET /api/metrics/summary` — before (baseline) vs after (live CaseMetric) comparison
+
+Set `GEOAPIFY_API_KEY` and `GEOAPIFY_MOCK=false` to call the real Geoapify Routing API; otherwise a deterministic mock is used.
+
+## Out of scope / later
+
+Continuous GPS tracking, national network optimisation, commercial penalty workflows.

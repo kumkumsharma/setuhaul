@@ -110,6 +110,7 @@ def evaluate_slot_for_shipment(
     *,
     now: datetime | None = None,
     ignore_appointment_id: str | None = None,
+    release_eta: datetime | None = None,
 ) -> FeasibilityResult:
     now = ensure_aware(now or get_settings().now())
     reasons: list[str] = []
@@ -154,7 +155,7 @@ def evaluate_slot_for_shipment(
             if vehicle.carrier_id == rule.rule_value:
                 reasons.append("facility_rule_carrier_blocked")
 
-    eta = get_effective_eta(db, shipment, now=now)
+    eta = ensure_aware(release_eta) if release_eta else get_effective_eta(db, shipment, now=now)
     if eta > slot_start:
         reasons.append("cannot_reach_before_slot_start")
 
@@ -194,6 +195,7 @@ def list_feasible_slots(
     after: datetime | None = None,
     limit: int = 10,
     now: datetime | None = None,
+    release_eta: datetime | None = None,
 ) -> list[tuple[AppointmentSlot, FeasibilityResult]]:
     now = ensure_aware(now or get_settings().now())
     after = ensure_aware(after or now)
@@ -216,12 +218,14 @@ def list_feasible_slots(
 
     results: list[tuple[AppointmentSlot, FeasibilityResult]] = []
     for slot in slots:
-        result = evaluate_slot_for_shipment(db, shipment, slot, now=now)
+        result = evaluate_slot_for_shipment(
+            db, shipment, slot, now=now, release_eta=release_eta
+        )
         if result.feasible:
             results.append((slot, result))
-        if len(results) >= limit:
-            break
-    return results
+    # Prefer safer buffers first when ranking
+    results.sort(key=lambda x: (-(x[1].buffer_minutes or 0), x[0].start_time))
+    return results[:limit]
 
 
 def current_appointment(db: Session, shipment_id: str) -> Appointment | None:

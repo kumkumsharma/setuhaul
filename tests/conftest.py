@@ -21,6 +21,9 @@ os.environ["SCENARIO_NOW"] = "2026-08-11T17:25:00+05:30"
 os.environ["REDIS_URL"] = "fakeredis://"
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["HOLD_TTL_SECONDS"] = "120"
+os.environ["GEOAPIFY_MOCK"] = "true"
+os.environ["GEOAPIFY_API_KEY"] = ""
+os.environ["LOCATION_STALE_MINUTES"] = "30"
 
 from app.config import get_settings  # noqa: E402
 from app.db import Base, get_db  # noqa: E402

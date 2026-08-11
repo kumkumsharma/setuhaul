@@ -72,11 +72,17 @@ def mark_options_shown(
     for view in prior:
         view.status = "stale"
 
-    feasible = list_feasible_slots(db, shipment, after=after, limit=limit, now=now)
+    # Phase 2: optional route ETA for ranking/buffers only (declared ETA rows unchanged)
+    from app.services.location import get_scheduling_eta
+
+    sched_eta, eta_source = get_scheduling_eta(db, shipment, exception.exception_id, now=now)
+    feasible = list_feasible_slots(
+        db, shipment, after=after or sched_eta, limit=limit * 2, now=now, release_eta=sched_eta
+    )
     redis = rc.get_redis()
     options: list[dict[str, Any]] = []
 
-    for rank, (slot, result) in enumerate(feasible, start=1):
+    for rank, (slot, result) in enumerate(feasible[:limit], start=1):
         # If another exception currently holds this slot, surface as unavailable to claim
         holder = redis.get(rc.hold_slot_key(slot.slot_id))
         lifecycle = "shown"
@@ -84,6 +90,7 @@ def mark_options_shown(
         if holder and holder != exception.exception_id:
             lifecycle = "stale"
             reasons.append("held_by_another_request")
+        reasons.append(f"eta_source:{eta_source}")
 
         view = OptionView(
             view_id=_new_id("VIEW"),
@@ -92,7 +99,13 @@ def mark_options_shown(
             shown_at=now,
             rank=rank,
             status="shown" if lifecycle == "shown" else "stale",
-            reason_json=rc.dumps({"reasons": reasons, "buffer_minutes": result.buffer_minutes}),
+            reason_json=rc.dumps(
+                {
+                    "reasons": reasons,
+                    "buffer_minutes": result.buffer_minutes,
+                    "eta_source": eta_source,
+                }
+            ),
         )
         db.add(view)
         options.append(
@@ -107,11 +120,18 @@ def mark_options_shown(
                 "lifecycle": lifecycle,
                 "reasons": reasons,
                 "buffer_minutes": result.buffer_minutes,
+                "eta_source": eta_source,
             }
         )
 
     exception.status = "awaiting_choice" if options else "escalated"
     db.commit()
+    try:
+        from app.services import metrics as metrics_svc
+
+        metrics_svc.mark_options_generated(db, exception.exception_id)
+    except Exception:  # noqa: BLE001
+        pass
     return options
 
 
@@ -142,7 +162,12 @@ def create_hold(
         raise AllocationError("not_found", "Shipment or slot not found")
 
     now = _now()
-    feasibility = evaluate_slot_for_shipment(db, shipment, slot, now=now)
+    from app.services.location import get_scheduling_eta
+
+    sched_eta, _src = get_scheduling_eta(db, shipment, exception_id, now=now)
+    feasibility = evaluate_slot_for_shipment(
+        db, shipment, slot, now=now, release_eta=sched_eta
+    )
     if not feasibility.feasible:
         raise AllocationError(
             "infeasible",
@@ -278,7 +303,12 @@ def confirm_hold(
     if not shipment or not slot:
         raise AllocationError("not_found", "Shipment or slot missing")
 
-    feasibility = evaluate_slot_for_shipment(db, shipment, slot, now=now)
+    from app.services.location import get_scheduling_eta
+
+    sched_eta, _src = get_scheduling_eta(db, shipment, hold.exception_id, now=now)
+    feasibility = evaluate_slot_for_shipment(
+        db, shipment, slot, now=now, release_eta=sched_eta
+    )
     if not feasibility.feasible:
         raise AllocationError(
             "became_infeasible",
