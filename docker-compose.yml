@@ -1,0 +1,14 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+  # Optional Postgres if you prefer DATABASE_URL=postgresql+psycopg://...
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: setuhaul
+  #     POSTGRES_PASSWORD: setuhaul
+  #     POSTGRES_DB: setuhaul
+  #   ports:
+  #     - "5432:5432"
