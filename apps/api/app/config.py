@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # Phase 2 — optional observability (no-op unless configured)
     langsmith_api_key: str = ""
     langsmith_project: str = "setuhaul-fde"
+    langsmith_tracing: bool = False
+
+    # Gemini conversational agent (optional — rules fallback when empty)
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
 
     @property
     def cors_origin_list(self) -> list[str]:

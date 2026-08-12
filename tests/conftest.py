@@ -24,6 +24,9 @@ os.environ["HOLD_TTL_SECONDS"] = "120"
 os.environ["GEOAPIFY_MOCK"] = "true"
 os.environ["GEOAPIFY_API_KEY"] = ""
 os.environ["LOCATION_STALE_MINUTES"] = "30"
+# Keep Gemini off in tests unless a case injects a model_factory / key
+os.environ["GEMINI_API_KEY"] = ""
+os.environ["LANGSMITH_TRACING"] = "false"
 
 from app.config import get_settings  # noqa: E402
 from app.db import Base, get_db  # noqa: E402

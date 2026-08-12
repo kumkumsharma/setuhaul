@@ -1,6 +1,6 @@
 # SetuHaul — Driver Exception & Dock Slot Coordination
 
-Phase 1 MVP: deterministic feasibility + Redis-backed allocation, domain APIs, and a minimal driver chat UI. **Capacity truth never comes from an LLM.**
+Deterministic feasibility + Redis-backed allocation, domain APIs, and a driver chat UI. **Capacity truth never comes from an LLM** — Gemini (optional) only understands language and calls tools.
 
 ## Quick start
 
@@ -21,17 +21,56 @@ cd apps/web && npm install && npm run dev
 - API: http://127.0.0.1:8000/docs  
 - Chat UI: http://127.0.0.1:5173  
 
-## Architecture (Phase 1)
+## Architecture
 
 ```
-Driver Chat UI (React)
-    → POST /api/chat  (deterministic orchestrator)
-        → domain services (shipment/appointment/exception)
-        → feasibility engine (rules, ETA precedence, compatibility)
-        → allocator (Redis SET NX holds → confirm/cancel in DB)
+React chat UI
+  → POST /api/chat
+  → Gemini via LangChain (if GEMINI_API_KEY set)
+       → LangChain tools
+       → existing deterministic Python services
+       → SQLite + Redis
+       → tool results back to Gemini
+       → natural-language driver reply
+  → else rule/regex orchestrator (fallback)
 ```
 
-Lifecycle is explicit: **shown → held → confirmed** (or **stale / released / expired**). Showing options does not reserve capacity.
+Lifecycle is explicit: **shown → held → confirmed** (or **stale / released / expired / escalated**). Showing options does not reserve capacity. Holds use Redis `SET NX`; confirmation updates SQLite.
+
+### LLM vs operational truth
+
+| Layer | Role |
+|-------|------|
+| Gemini + LangChain | Intent, NLU, clarification, tool selection, explaining tool results |
+| LangChain tools | Thin wrappers around existing domain / feasibility / allocator / location |
+| Feasibility + allocator | Sole source of slots, capacity, holds, confirms |
+| SQLite | System of record (appointments, exceptions, messages) |
+| Redis | Short-TTL holds + idempotency only |
+
+The agent **must not** invent slot IDs, capacity, ETAs, or confirm without a successful `confirm_hold`.
+
+## Gemini setup (optional)
+
+1. Get a Google AI Studio / Gemini API key.
+2. In `.env` set:
+   - `GEMINI_API_KEY=...`
+   - `GEMINI_MODEL=gemini-2.5-flash` (or another currently supported Gemini model)
+3. Restart the API. `POST /api/chat` uses the LLM path when the key is present.
+4. Leave `GEMINI_API_KEY` empty to keep the fully functional rule-based fallback.
+
+Code: `apps/api/app/services/agent_llm.py` + `agent_tools.py`.
+
+## LangSmith setup (optional)
+
+Tracing is off unless configured. Leave keys empty for local runs.
+
+```bash
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=setuhaul-fde
+LANGSMITH_TRACING=false
+```
+
+Set `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` to emit LangChain/LangSmith traces around agent runs. Absence of LangSmith never blocks chat.
 
 ## Manual configuration
 
@@ -41,15 +80,20 @@ Lifecycle is explicit: **shown → held → confirmed** (or **stale / released /
 | `REDIS_URL` | Default `fakeredis://` works without Docker. Use `redis://localhost:6379/0` with `docker compose up -d redis`. |
 | `DATABASE_URL` | Default SQLite file under `data/runtime/`. |
 | `SCENARIO_NOW` | Fixed to PDF Jaipur snapshot `2026-08-11T17:25:00+05:30` for demos/tests. |
+| `GEMINI_API_KEY` | Optional conversational agent; empty → rules fallback. |
+| `LANGSMITH_*` | Optional tracing; not required locally. |
 | Python | Use 3.12 (`~/.local/bin/python3.12` or `brew install python@3.12`). |
 
 ## Tests
 
 ```bash
 source .venv312/bin/activate   # or .venv if created with Python 3.12
+pip install -r apps/api/requirements.txt
 export PYTHONPATH=apps/api
 pytest -q
 ```
+
+Agent tests mock Gemini (`model_factory`); they exercise real tools against the deterministic engine. Concurrency and idempotency tests remain on the allocator path.
 
 ## Phase 2 (location, scheduling, metrics)
 
@@ -63,4 +107,4 @@ Set `GEOAPIFY_API_KEY` and `GEOAPIFY_MOCK=false` to call the real Geoapify Routi
 
 ## Out of scope / later
 
-Continuous GPS tracking, national network optimisation, commercial penalty workflows.
+AgentCore, production Redis/Postgres migration, Vercel/CloudWatch, continuous GPS tracking, national network optimisation.
