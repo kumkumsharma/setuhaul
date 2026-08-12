@@ -21,7 +21,7 @@ from app.services.agent_tools import (
     reset_session,
     set_session,
 )
-from app.services.observability import configure_langsmith_env, trace_event
+from app.services.observability import configure_langsmith_env, langsmith_tracing_enabled, trace_event
 
 
 SYSTEM_PROMPT = """You are a SetuHaul driver operations assistant.
@@ -75,6 +75,18 @@ def _build_model():
     )
 
 
+def _extract_text(content: Any) -> str:
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                text_parts.append(block)
+        return "\n".join(text_parts)
+    return str(content or "").strip()
+
+
 def run_tool_loop(
     *,
     model,
@@ -82,47 +94,57 @@ def run_tool_loop(
     messages: list,
     max_iters: int = 8,
 ) -> tuple[str, list[str]]:
-    """Simple tool-calling loop. Returns final assistant text + tool names used this turn."""
+    """Simple tool-calling loop. Returns final assistant text + tool names used this turn.
 
-    tool_map = {t.name: t for t in tools}
-    turn_tools: list[str] = []
-    model_with_tools = model.bind_tools(tools)
+    When LangSmith tracing is enabled, this parent run plus nested Gemini
+    `invoke` and StructuredTool `invoke` calls form the LangSmith trace tree.
+    """
 
-    for _ in range(max_iters):
-        ai: AIMessage = model_with_tools.invoke(messages)  # type: ignore[assignment]
-        messages.append(ai)
-        tool_calls = getattr(ai, "tool_calls", None) or []
-        if not tool_calls:
-            content = ai.content
-            if isinstance(content, list):
-                # Gemini sometimes returns content blocks
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif isinstance(block, str):
-                        text_parts.append(block)
-                content = "\n".join(text_parts)
-            return (str(content or "").strip(), turn_tools)
+    def _loop() -> tuple[str, list[str]]:
+        tool_map = {t.name: t for t in tools}
+        turn_tools: list[str] = []
+        model_with_tools = model.bind_tools(tools)
 
-        for tc in tool_calls:
-            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
-            args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}) or {}
-            tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", name)
-            if name not in tool_map:
-                result = f'{{"error":"unknown_tool","name":"{name}"}}'
-            else:
-                try:
-                    result = tool_map[name].invoke(args)
-                except Exception as exc:  # noqa: BLE001
-                    result = f'{{"error":"tool_failed","detail":"{exc}"}}'
-            turn_tools.append(str(name))
-            messages.append(ToolMessage(content=str(result), tool_call_id=str(tc_id)))
+        for _ in range(max_iters):
+            ai: AIMessage = model_with_tools.invoke(messages)  # type: ignore[assignment]
+            messages.append(ai)
+            tool_calls = getattr(ai, "tool_calls", None) or []
+            if not tool_calls:
+                return (_extract_text(ai.content), turn_tools)
 
-    return (
-        "I reached the tool-call limit. Please ask again or contact operations.",
-        turn_tools,
-    )
+            for tc in tool_calls:
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}) or {}
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", name)
+                if name not in tool_map:
+                    result = f'{{"error":"unknown_tool","name":"{name}"}}'
+                else:
+                    try:
+                        result = tool_map[name].invoke(args)
+                    except Exception as exc:  # noqa: BLE001
+                        result = f'{{"error":"tool_failed","detail":"{exc}"}}'
+                turn_tools.append(str(name))
+                messages.append(ToolMessage(content=str(result), tool_call_id=str(tc_id)))
+
+        return (
+            "I reached the tool-call limit. Please ask again or contact operations.",
+            turn_tools,
+        )
+
+    if langsmith_tracing_enabled():
+        try:
+            from langsmith import traceable
+
+            traced = traceable(
+                name="setuhaul_driver_agent",
+                run_type="chain",
+                metadata={"component": "agent_llm"},
+            )(_loop)
+            return traced()
+        except Exception:  # noqa: BLE001
+            # Tracing must never block the operational chat path.
+            return _loop()
+    return _loop()
 
 
 def handle_chat_llm(
