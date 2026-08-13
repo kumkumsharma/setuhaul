@@ -92,6 +92,62 @@ def test_multi_shipment_disambiguation(client):
     assert "more than one" in body["reply"].lower()
 
 
+def test_multi_shipment_select_by_full_id(client):
+    res = client.post(
+        "/api/chat",
+        json={
+            "driver_id": "DRV-MULTI",
+            "message": "SHP-MULTI-A",
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["shipment_id"] == "SHP-MULTI-A"
+    assert body["needs_shipment_choice"] == []
+
+
+def test_multi_shipment_select_by_letter_alias(client):
+    for alias, expected in (("A", "SHP-MULTI-A"), ("B", "SHP-MULTI-B"), ("b", "SHP-MULTI-B")):
+        res = client.post(
+            "/api/chat",
+            json={"driver_id": "DRV-MULTI", "message": alias},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["shipment_id"] == expected, alias
+        assert body["needs_shipment_choice"] == []
+
+
+def test_stale_exception_and_shipment_ignored_on_driver_switch(client):
+    """After switching drivers, old exception_id / foreign shipment_id must not stick."""
+    first = client.post(
+        "/api/chat",
+        json={
+            "driver_id": "DRV-027",
+            "shipment_id": "SHP-1042",
+            "message": "Tyre damaged near Neemrana. Slot after 7 PM?",
+        },
+    )
+    assert first.status_code == 200
+    old_exc = first.json().get("exception_id") or ""
+
+    res = client.post(
+        "/api/chat",
+        json={
+            "driver_id": "DRV-MULTI",
+            "exception_id": old_exc,
+            "shipment_id": "SHP-1042",
+            "message": "I am stuck in traffic and will be late.",
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["shipment_id"] == ""
+    assert len(body["needs_shipment_choice"]) == 2
+    # Must not continue the previous driver's exception case
+    assert body["exception_id"] in ("", None) or body["exception_id"] != old_exc
+
+
 def test_shown_is_not_hold(db_session):
     from app.models import DriverException
     from app.services import domain as domain_svc

@@ -141,6 +141,30 @@ def _parse_choice_rank(text: str) -> int | None:
     return None
 
 
+def resolve_shipment_from_message(message: str, shipments: list[Any]) -> str | None:
+    """Map driver text to an active shipment ID.
+
+    Supports full IDs (e.g. SHP-MULTI-A) and short aliases matching the
+    trailing segment after the last hyphen (e.g. A → SHP-MULTI-A, B → SHP-MULTI-B).
+    Does not treat bare digits as aliases so slot ranks 1/2/3 stay intact.
+    """
+    lower = (message or "").lower().strip()
+    if not lower or not shipments:
+        return None
+    # Longest full-ID substring wins (avoids partial collisions).
+    id_hits = [s for s in shipments if s.shipment_id.lower() in lower]
+    if id_hits:
+        id_hits.sort(key=lambda s: len(s.shipment_id), reverse=True)
+        return id_hits[0].shipment_id
+    # Exact short token alias: "A" / "B" ↔ suffix after last '-'
+    if re.fullmatch(r"[a-z]+", lower):
+        for s in shipments:
+            suffix = s.shipment_id.rsplit("-", 1)[-1].lower()
+            if suffix == lower:
+                return s.shipment_id
+    return None
+
+
 def _wants_options(text: str) -> bool:
     lower = text.lower()
     return any(
@@ -225,9 +249,26 @@ def handle_chat(
     exception: DriverException | None = None
     if exception_id:
         exception = db.get(DriverException, exception_id)
+    # Stale exception_id from a previous driver/case must not leak into this turn.
+    if exception is not None and (
+        exception.driver_id != driver_id
+        or (exception.shipment_id and exception.shipment_id not in {s.shipment_id for s in shipments})
+    ):
+        exception = None
+        exception_id = None
+
+    # Ignore shipment_id that does not belong to this driver (stale UI after driver switch).
+    owned_ids = {s.shipment_id for s in shipments}
+    if shipment_id and shipment_id not in owned_ids:
+        shipment_id = None
+
+    # Prefer an explicit selection in the driver message (full ID or A/B alias).
+    from_message = resolve_shipment_from_message(message, shipments)
+    if from_message:
+        shipment_id = from_message
 
     # Shipment disambiguation
-    if not shipment_id and exception:
+    if not shipment_id and exception and exception.shipment_id in owned_ids:
         shipment_id = exception.shipment_id
     if not shipment_id:
         if len(shipments) == 0:
@@ -262,12 +303,6 @@ def handle_chat(
                 "appointment": None,
             }
         shipment_id = shipments[0].shipment_id
-
-    # Allow selecting shipment by ID in message
-    for s in shipments:
-        if s.shipment_id.lower() in message.lower():
-            shipment_id = s.shipment_id
-            break
 
     shipment = domain.get_shipment(db, shipment_id)  # type: ignore[arg-type]
     tools_used.append("get_shipment")

@@ -311,7 +311,23 @@ def handle_chat_with_fallback(
 ) -> dict[str, Any]:
     """Use Gemini when configured; otherwise / on failure use rule-based handle_chat."""
 
-    from app.services.chat import handle_chat
+    from app.services.chat import handle_chat, resolve_shipment_from_message
+
+    # Resolve A/B / full shipment IDs from the message before either path so the LLM
+    # and rule engine share the same disambiguation behaviour.
+    active = domain.list_active_shipments(db, driver_id)
+    owned = {s.shipment_id for s in active}
+    if shipment_id and shipment_id not in owned:
+        shipment_id = None
+    resolved = resolve_shipment_from_message(message, active)
+    if resolved:
+        shipment_id = resolved
+    if exception_id:
+        exc = db.get(DriverException, exception_id)
+        if exc is None or exc.driver_id != driver_id or (
+            exc.shipment_id and exc.shipment_id not in owned
+        ):
+            exception_id = None
 
     if gemini_configured() or model_factory is not None:
         try:

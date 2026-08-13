@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   declineLocation,
   fetchMetrics,
@@ -8,6 +8,7 @@ import {
   sendChat,
   submitLocation,
 } from "./api/client.js";
+import { shouldApplyInFlightChatResult } from "./chatRequestGuard.js";
 
 const DEMO_DRIVERS = [
   { id: "DRV-027", label: "Ravi Kumar (tyre / Neemrana)" },
@@ -50,6 +51,11 @@ function applyChatResult(res, setters) {
   if (res.needs_shipment_choice?.length) setShipments(res.needs_shipment_choice);
 }
 
+const SYSTEM_CHAT_INTRO = {
+  role: "system",
+  text: "SetuHaul exception chat. Capacity comes only from the allocation engine — shown ≠ held ≠ confirmed. Location sharing is optional.",
+};
+
 export default function App() {
   const [tab, setTab] = useState("chat");
   const [driverId, setDriverId] = useState("DRV-027");
@@ -59,12 +65,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [messages, setMessages] = useState([
-    {
-      role: "system",
-      text: "SetuHaul exception chat. Capacity comes only from the allocation engine — shown ≠ held ≠ confirmed. Location sharing is optional.",
-    },
-  ]);
+  const [messages, setMessages] = useState([SYSTEM_CHAT_INTRO]);
   const [options, setOptions] = useState([]);
   const [status, setStatus] = useState("idle");
   const [hold, setHold] = useState(null);
@@ -75,6 +76,10 @@ export default function App() {
   const [schedule, setSchedule] = useState(null);
   const [metrics, setMetrics] = useState(null);
   const [ops, setOps] = useState(null);
+  // Bumped on driver switch / case reset so late LLM responses cannot mutate the new chat.
+  const chatEpochRef = useRef(0);
+  const driverIdRef = useRef(driverId);
+  driverIdRef.current = driverId;
 
   const setters = useMemo(
     () => ({
@@ -95,42 +100,110 @@ export default function App() {
 
   const statusLabel = useMemo(() => status, [status]);
 
-  async function loadShipments(id = driverId) {
+  function currentChatCtx() {
+    return { epoch: chatEpochRef.current, driverId: driverIdRef.current };
+  }
+
+  function isCurrentChatRequest(requestCtx) {
+    return shouldApplyInFlightChatResult(requestCtx, currentChatCtx());
+  }
+
+  function clearCaseUiState() {
+    // Invalidate any in-flight chat/location response for the previous case.
+    chatEpochRef.current += 1;
+    setExceptionId(null);
+    setShipmentId("");
+    setShipments([]);
+    setMessages([SYSTEM_CHAT_INTRO]);
+    setOptions([]);
+    setHold(null);
+    setStatus("idle");
+    setClientAction(null);
+    setWaitingForBrowser(false);
+    setEtaComparison(null);
+    setTools([]);
+    setError("");
+    setInput("");
+    setBusy(false);
+  }
+
+  async function loadShipmentsForDriver(nextDriverId, requestCtx = null) {
+    const rows = await fetchShipments(nextDriverId);
+    if (requestCtx && !isCurrentChatRequest(requestCtx)) {
+      return rows;
+    }
+    setShipments(rows);
+    if (rows.length === 1) {
+      setShipmentId(rows[0].shipment_id);
+    } else {
+      // Multi or none: leave selection empty so the next chat cannot reuse another driver's shipment.
+      setShipmentId("");
+    }
+    return rows;
+  }
+
+  async function switchDriver(nextDriverId) {
+    driverIdRef.current = nextDriverId;
+    setDriverId(nextDriverId);
+    clearCaseUiState();
+    const requestCtx = { epoch: chatEpochRef.current, driverId: nextDriverId };
     try {
-      const rows = await fetchShipments(id);
-      setShipments(rows);
-      if (rows.length === 1) setShipmentId(rows[0].shipment_id);
+      await loadShipmentsForDriver(nextDriverId, requestCtx);
     } catch (err) {
-      setError(err.message);
+      if (isCurrentChatRequest(requestCtx)) setError(err.message);
     }
   }
 
-  async function onSend(text) {
+  async function loadShipments(id = driverId) {
+    const requestCtx = { epoch: chatEpochRef.current, driverId: id };
+    try {
+      await loadShipmentsForDriver(id, requestCtx);
+    } catch (err) {
+      if (isCurrentChatRequest(requestCtx)) setError(err.message);
+    }
+  }
+
+  /**
+   * @param {string} [text]
+   * @param {{ shipmentId?: string | null }} [opts] — explicit shipment for this request (avoids stale React state).
+   */
+  async function onSend(text, opts = {}) {
     const message = (text ?? input).trim();
     if (!message || busy) return;
+    const shipmentForRequest =
+      opts.shipmentId !== undefined ? opts.shipmentId || null : shipmentId || null;
+    if (opts.shipmentId !== undefined) {
+      setShipmentId(opts.shipmentId || "");
+    }
+    const requestCtx = { epoch: chatEpochRef.current, driverId };
     setBusy(true);
     setError("");
     setMessages((m) => [...m, { role: "driver", text: message }]);
     setInput("");
     try {
-      const idempotencyKey = `${driverId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const idempotencyKey = `${requestCtx.driverId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const res = await sendChat({
-        driverId,
+        driverId: requestCtx.driverId,
         message,
         exceptionId,
-        shipmentId: shipmentId || null,
+        shipmentId: shipmentForRequest,
         idempotencyKey,
       });
+      if (!isCurrentChatRequest(requestCtx)) return;
       applyChatResult(res, setters);
     } catch (err) {
+      if (!isCurrentChatRequest(requestCtx)) return;
       setError(err.message);
     } finally {
-      setBusy(false);
+      if (isCurrentChatRequest(requestCtx)) setBusy(false);
     }
   }
 
   async function onShareLocation(useDemo = false) {
     if (!exceptionId || busy) return;
+    const requestCtx = { epoch: chatEpochRef.current, driverId };
+    const requestExceptionId = exceptionId;
+    const requestShipmentId = shipmentId;
     setBusy(true);
     setError("");
     try {
@@ -160,6 +233,7 @@ export default function App() {
           capturedAt: new Date(pos.timestamp).toISOString(),
         };
       }
+      if (!isCurrentChatRequest(requestCtx)) return;
       setMessages((m) => [
         ...m,
         {
@@ -170,40 +244,51 @@ export default function App() {
         },
       ]);
       const res = await submitLocation({
-        exceptionId,
-        shipmentId,
+        exceptionId: requestExceptionId,
+        shipmentId: requestShipmentId,
         latitude: coords.latitude,
         longitude: coords.longitude,
         accuracy: coords.accuracy,
         capturedAt: coords.capturedAt,
       });
+      if (!isCurrentChatRequest(requestCtx)) return;
       applyChatResult(res, setters);
     } catch (err) {
+      if (!isCurrentChatRequest(requestCtx)) return;
       const res = await submitLocation({
-        exceptionId,
-        shipmentId,
+        exceptionId: requestExceptionId,
+        shipmentId: requestShipmentId,
         latitude: 0,
         longitude: 0,
         denied: true,
         error: err.message || "geolocation_failed",
       });
+      if (!isCurrentChatRequest(requestCtx)) return;
       applyChatResult(res, setters);
     } finally {
-      setBusy(false);
+      if (isCurrentChatRequest(requestCtx)) setBusy(false);
     }
   }
 
   async function onDeclineLocation() {
     if (!exceptionId || busy) return;
+    const requestCtx = { epoch: chatEpochRef.current, driverId };
+    const requestExceptionId = exceptionId;
+    const requestShipmentId = shipmentId;
     setBusy(true);
     try {
       setMessages((m) => [...m, { role: "driver", text: "I do not want to share location." }]);
-      const res = await declineLocation({ exceptionId, shipmentId });
+      const res = await declineLocation({
+        exceptionId: requestExceptionId,
+        shipmentId: requestShipmentId,
+      });
+      if (!isCurrentChatRequest(requestCtx)) return;
       applyChatResult(res, setters);
     } catch (err) {
+      if (!isCurrentChatRequest(requestCtx)) return;
       setError(err.message);
     } finally {
-      setBusy(false);
+      if (isCurrentChatRequest(requestCtx)) setBusy(false);
     }
   }
 
@@ -277,18 +362,7 @@ export default function App() {
               <select
                 value={driverId}
                 onChange={(e) => {
-                  setDriverId(e.target.value);
-                  setExceptionId(null);
-                  setOptions([]);
-                  setHold(null);
-                  setStatus("idle");
-                  setClientAction(null);
-                  const next = e.target.value;
-                  if (next === "DRV-027") setShipmentId("SHP-1042");
-                  else if (next === "DRV-NOP") setShipmentId("SHP-NOP");
-                  else if (next === "DRV-HIPRI") setShipmentId("SHP-HIPRI");
-                  else if (next === "DRV-MULTI") setShipmentId("");
-                  else if (next.startsWith("DRV-EVE")) setShipmentId(next.replace("DRV", "SHP"));
+                  void switchDriver(e.target.value);
                 }}
               >
                 {DEMO_DRIVERS.map((d) => (
@@ -318,8 +392,9 @@ export default function App() {
                   key={s.shipment_id}
                   type="button"
                   onClick={() => {
-                    setShipmentId(s.shipment_id);
-                    onSend(s.shipment_id);
+                    // Send the shipment ID as the disambiguation reply, with an explicit
+                    // shipmentId so /api/chat never sees the previous driver's shipment.
+                    void onSend(s.shipment_id, { shipmentId: s.shipment_id });
                   }}
                 >
                   {s.shipment_id} → {s.destination_id}
