@@ -54,8 +54,9 @@ def _declines_location(text: str) -> bool:
             "do not share",
             "dont share",
             "without location",
-            "declared eta",
             "skip location",
+            "declared eta",
+            "continue with declared",
             "no thanks",
             "i do not want to share",
         ]
@@ -472,33 +473,23 @@ def handle_chat(
             )
             tools_used.append("confirm_hold")
             appt_ctx = domain.appointment_to_dict(db, appointment)
-            # Metrics: projected wait old vs new
-            old_wait = None
-            new_wait = None
-            if appt_ctx and appt_ctx.get("slot_start"):
-                from app.services.location import get_scheduling_eta
-
-                sched_eta, eta_src = get_scheduling_eta(db, shipment, exception.exception_id)
-                new_wait = max(
-                    0,
-                    int((ensure_aware(appt_ctx["slot_start"]) - sched_eta).total_seconds() // 60),  # type: ignore[operator]
-                )
-                if exception.latest_declared_eta or shipment.planned_eta:
-                    # old plan = previous appointment if superseded context unavailable → use planned slot delta
-                    old_appt = appt_ctx
-                    # approximate old wait vs original infeasible appointment start if present in history
-                    old_wait = max(0, new_wait + 20)
-                metrics_svc.mark_resolved(
-                    db,
-                    exception.exception_id,
-                    status="confirmed",
-                    human=False,
-                    first_option_accepted=True,
-                    eta_source_used=eta_src,
-                    predicted_eta=sched_eta,
-                    old_wait=old_wait,
-                    new_wait=new_wait,
-                )
+            confirm_m = metrics_svc.confirm_wait_and_first_option(
+                db,
+                shipment=shipment,
+                exception_id=exception.exception_id,
+                new_appointment=appointment,
+            )
+            metrics_svc.mark_resolved(
+                db,
+                exception.exception_id,
+                status="confirmed",
+                human=False,
+                first_option_accepted=confirm_m["first_option_accepted"],
+                eta_source_used=confirm_m["eta_source_used"],
+                predicted_eta=confirm_m["predicted_eta"],
+                old_wait=confirm_m["old_wait"],
+                new_wait=confirm_m["new_wait"],
+            )
             reply = (
                 f"Confirmed. Appointment {appointment.appointment_id} is booked on "
                 f"{appointment.slot_id} ({_fmt(appt_ctx.get('slot_start') if appt_ctx else None)}-"

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   declineLocation,
   fetchMetrics,
+  fetchOpsSummary,
   fetchShipments,
   runSchedule,
   sendChat,
@@ -34,6 +35,7 @@ function applyChatResult(res, setters) {
     setShipments,
     setClientAction,
     setEtaComparison,
+    setWaitingForBrowser,
   } = setters;
   setExceptionId(res.exception_id || null);
   if (res.shipment_id) setShipmentId(res.shipment_id);
@@ -42,6 +44,7 @@ function applyChatResult(res, setters) {
   setHold(res.hold || null);
   setTools(res.tools_used || []);
   setClientAction(res.client_action || null);
+  setWaitingForBrowser(Boolean(res.waiting_for_browser));
   setEtaComparison(res.eta_comparison || null);
   setMessages((m) => [...m, { role: "agent", text: res.reply, escalated: res.escalated }]);
   if (res.needs_shipment_choice?.length) setShipments(res.needs_shipment_choice);
@@ -67,9 +70,11 @@ export default function App() {
   const [hold, setHold] = useState(null);
   const [tools, setTools] = useState([]);
   const [clientAction, setClientAction] = useState(null);
+  const [waitingForBrowser, setWaitingForBrowser] = useState(false);
   const [etaComparison, setEtaComparison] = useState(null);
   const [schedule, setSchedule] = useState(null);
   const [metrics, setMetrics] = useState(null);
+  const [ops, setOps] = useState(null);
 
   const setters = useMemo(
     () => ({
@@ -83,6 +88,7 @@ export default function App() {
       setShipments,
       setClientAction,
       setEtaComparison,
+      setWaitingForBrowser,
     }),
     []
   );
@@ -218,7 +224,9 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      setMetrics(await fetchMetrics());
+      const [m, o] = await Promise.all([fetchMetrics(), fetchOpsSummary()]);
+      setMetrics(m);
+      setOps(o);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -330,7 +338,7 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              {clientAction === "REQUEST_BROWSER_LOCATION" || exceptionId ? (
+              {clientAction === "REQUEST_BROWSER_LOCATION" || waitingForBrowser ? (
                 <div className="location-bar">
                   <button type="button" onClick={() => onShareLocation(false)} disabled={busy || !exceptionId}>
                     Share location
@@ -496,6 +504,31 @@ export default function App() {
             </div>
           ) : null}
           {metrics?.comparison_note ? <p className="hint">{metrics.comparison_note}</p> : null}
+          {ops ? (
+            <div className="ops-box" style={{ marginTop: "1.25rem" }}>
+              <h3>Ops / application log summary</h3>
+              <p className="hint">{ops.note}</p>
+              <ul>
+                <li>HTTP requests (window): {ops.http_requests}</li>
+                <li>Avg latency: {ops.avg_latency_ms ?? "—"} ms</li>
+                <li>p95 latency: {ops.p95_latency_ms ?? "—"} ms</li>
+                <li>HTTP failures: {ops.failures} (rate {ops.failure_rate ?? "—"})</li>
+                <li>Completed (log): {ops.completed_cases}</li>
+                <li>Escalated (log): {ops.escalated_cases}</li>
+                <li>Human-help events: {ops.human_help_events}</li>
+                <li>Location failures: {ops.location_failures}</li>
+                <li>
+                  CaseMetric — open {ops.case_metrics?.open}, confirmed {ops.case_metrics?.confirmed},
+                  escalated {ops.case_metrics?.escalated}, human {ops.case_metrics?.human_intervention}
+                </li>
+              </ul>
+              {(ops.recent || []).length ? (
+                <pre className="block" style={{ maxHeight: 180, overflow: "auto" }}>
+                  {JSON.stringify(ops.recent.slice(0, 12), null, 2)}
+                </pre>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       ) : null}
     </div>

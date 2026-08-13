@@ -201,15 +201,21 @@ def list_feasible_slots(
     after = ensure_aware(after or now)
     assert now and after
 
-    # SQLite stores naive datetimes — compare using naive IST wall times in SQL filter
-    after_naive = after.replace(tzinfo=None)
+    # SQLite stores naive IST wall times; Postgres stores timestamptz (UTC).
+    # Compare like-for-like so the SQL filter does not mis-interpret naive as UTC.
+    bind = db.get_bind()
+    dialect = bind.dialect.name if bind is not None else "sqlite"
+    if dialect == "sqlite":
+        after_cmp: datetime = after.replace(tzinfo=None)
+    else:
+        after_cmp = after
 
     slots = (
         db.query(AppointmentSlot)
         .options(joinedload(AppointmentSlot.dock))
         .filter(
             AppointmentSlot.facility_id == shipment.destination_id,
-            AppointmentSlot.start_time >= after_naive,
+            AppointmentSlot.start_time >= after_cmp,
             AppointmentSlot.slot_status == "open",
         )
         .order_by(AppointmentSlot.start_time.asc())

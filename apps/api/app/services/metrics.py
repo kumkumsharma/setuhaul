@@ -6,10 +6,19 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.config import get_settings
-from app.models import BaselineMetric, CaseMetric, FacilityCheckin
+from app.models import (
+    Appointment,
+    AppointmentSlot,
+    BaselineMetric,
+    CaseMetric,
+    FacilityCheckin,
+    OptionView,
+    Shipment,
+)
+from app.services import ops_log
 from app.services.timeutil import ensure_aware
 
 
@@ -19,6 +28,82 @@ def _new_id(prefix: str) -> str:
 
 def _now() -> datetime:
     return ensure_aware(get_settings().now())  # type: ignore[return-value]
+
+
+def projected_wait_minutes(eta: datetime | None, slot_start: datetime | None) -> int | None:
+    """Minutes from scheduling ETA to slot start; None if either side missing."""
+    if not eta or not slot_start:
+        return None
+    e = ensure_aware(eta)
+    s = ensure_aware(slot_start)
+    if not e or not s:
+        return None
+    return max(0, int((s - e).total_seconds() // 60))
+
+
+def first_offered_slot_id(db: Session, exception_id: str) -> str | None:
+    """Earliest rank-1 option shown for this exception (first offered batch)."""
+    view = (
+        db.query(OptionView)
+        .filter(OptionView.exception_id == exception_id, OptionView.rank == 1)
+        .order_by(OptionView.shown_at.asc())
+        .first()
+    )
+    return view.slot_id if view else None
+
+
+def confirm_wait_and_first_option(
+    db: Session,
+    *,
+    shipment: Shipment,
+    exception_id: str,
+    new_appointment: Appointment,
+) -> dict[str, Any]:
+    """Honest post-confirm metrics: real old/new waits + whether first offered slot won.
+
+    Old wait uses the most recently superseded appointment for the shipment (set by
+    allocator.confirm_hold). New wait uses the newly confirmed appointment slot.
+    Both are measured against the same scheduling ETA (gate-in > route > declared).
+    """
+    from app.services.location import get_scheduling_eta
+
+    sched_eta, eta_src = get_scheduling_eta(db, shipment, exception_id)
+    new_slot = new_appointment.slot
+    if new_slot is None:
+        new_slot = db.get(AppointmentSlot, new_appointment.slot_id)
+    new_wait = projected_wait_minutes(
+        sched_eta, new_slot.start_time if new_slot else None
+    )
+
+    prior = (
+        db.query(Appointment)
+        .options(joinedload(Appointment.slot))
+        .filter(
+            Appointment.shipment_id == shipment.shipment_id,
+            Appointment.status == "superseded",
+        )
+        .order_by(Appointment.cancelled_at.desc().nullslast())
+        .first()
+    )
+    old_wait = None
+    if prior is not None:
+        prior_slot = prior.slot or db.get(AppointmentSlot, prior.slot_id)
+        old_wait = projected_wait_minutes(
+            sched_eta, prior_slot.start_time if prior_slot else None
+        )
+
+    first_slot = first_offered_slot_id(db, exception_id)
+    first_accepted = (
+        (first_slot == new_appointment.slot_id) if first_slot else None
+    )
+
+    return {
+        "eta_source_used": eta_src,
+        "predicted_eta": sched_eta,
+        "old_wait": old_wait,
+        "new_wait": new_wait,
+        "first_option_accepted": first_accepted,
+    }
 
 
 def ensure_case_metric(db: Session, exception_id: str, shipment_id: str) -> CaseMetric:
@@ -87,6 +172,19 @@ def mark_resolved(
         row.actual_gate_in = ensure_aware(checkin.gate_in_at)
     db.commit()
 
+    outcome = "completed" if status == "confirmed" else ("escalated" if status == "escalated" else status)
+    ops_log.record_event(
+        kind="domain",
+        outcome=outcome if not human else ("human_help" if status == "escalated" else outcome),
+        detail=f"exception={exception_id} status={status}",
+    )
+    if human or status == "escalated":
+        ops_log.record_event(
+            kind="domain",
+            outcome="human_help",
+            detail=f"exception={exception_id}",
+        )
+
 
 def summary(db: Session) -> dict[str, Any]:
     cases = db.query(CaseMetric).all()
@@ -119,6 +217,7 @@ def summary(db: Session) -> dict[str, Any]:
         if c.old_projected_wait_minutes is not None and c.new_projected_wait_minutes is not None:
             wait_reduced.append(c.old_projected_wait_minutes - c.new_projected_wait_minutes)
 
+    first_known = [c for c in confirmed if c.first_option_accepted is not None]
     solution = {
         "cases": len(cases),
         "resolved": len(resolved),
@@ -138,10 +237,10 @@ def summary(db: Session) -> dict[str, Any]:
         "avg_eta_error_minutes": eta_error(cases),
         "first_option_accept_rate": (
             round(
-                sum(1 for c in confirmed if c.first_option_accepted) / len(confirmed),
+                sum(1 for c in first_known if c.first_option_accepted) / len(first_known),
                 2,
             )
-            if confirmed
+            if first_known
             else None
         ),
         "avg_wait_reduced_minutes": (
@@ -167,6 +266,29 @@ def summary(db: Session) -> dict[str, Any]:
         "after_solution": solution,
         "comparison_note": (
             "Before values are seeded classroom baselines for similar delay types; "
-            "after values are computed from CaseMetric rows generated by the live workflow."
+            "after values are computed from CaseMetric rows generated by the live workflow. "
+            "Wait reduction uses superseded vs new appointment slot starts against the same "
+            "scheduling ETA; first-option accept compares the confirmed slot to the earliest "
+            "rank-1 shown option."
         ),
+    }
+
+
+def ops_summary(db: Session) -> dict[str, Any]:
+    """Combine live CaseMetric outcomes with in-process request/event log."""
+    snap = ops_log.snapshot()
+    cases = db.query(CaseMetric).all()
+    confirmed = sum(1 for c in cases if c.resolution_status == "confirmed")
+    escalated = sum(1 for c in cases if c.resolution_status == "escalated")
+    human = sum(1 for c in cases if c.human_intervention)
+    open_cases = sum(1 for c in cases if c.resolution_status == "open")
+    return {
+        **snap,
+        "case_metrics": {
+            "open": open_cases,
+            "confirmed": confirmed,
+            "escalated": escalated,
+            "human_intervention": human,
+            "total": len(cases),
+        },
     }

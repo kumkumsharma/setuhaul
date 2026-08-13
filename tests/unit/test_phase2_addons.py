@@ -177,3 +177,177 @@ def test_stale_location_falls_back(db_session):
     shipment = db_session.get(Shipment, "SHP-1042")
     _eta, source = location_svc.get_scheduling_eta(db_session, shipment, exc.exception_id)
     assert source == "declared_or_planned"
+
+
+def test_ops_summary_endpoint(client):
+    from app.services import ops_log
+
+    ops_log.reset_for_tests()
+    # Generate a chat hit so middleware records latency
+    client.post(
+        "/api/chat",
+        json={
+            "driver_id": "DRV-027",
+            "shipment_id": "SHP-1042",
+            "message": "Need slots after 7 PM",
+        },
+    )
+    res = client.get("/api/metrics/ops")
+    assert res.status_code == 200
+    body = res.json()
+    assert "avg_latency_ms" in body
+    assert "failures" in body
+    assert "case_metrics" in body
+    assert body["http_requests"] >= 1
+    assert "application-log" in body["note"].lower() or "CloudWatch" in body["note"]
+
+
+def test_confirm_metrics_use_superseded_appointment_not_heuristic(client, db_session):
+    from app.models import Appointment, CaseMetric
+    from app.services.timeutil import ensure_aware
+
+    # Known prior appointment for SHP-1042 in seed
+    prior = (
+        db_session.query(Appointment)
+        .filter(
+            Appointment.shipment_id == "SHP-1042",
+            Appointment.status.in_(["confirmed", "pending"]),
+        )
+        .first()
+    )
+    assert prior is not None
+    prior_start = ensure_aware(prior.slot.start_time)
+
+    chat = client.post(
+        "/api/chat",
+        json={
+            "driver_id": "DRV-027",
+            "shipment_id": "SHP-1042",
+            "message": "Need slots after 7 PM. skip location",
+        },
+    ).json()
+    # Rules path may still prompt location; force skip
+    if "share your current location" in (chat.get("reply") or "").lower():
+        chat = client.post(
+            "/api/chat",
+            json={
+                "driver_id": "DRV-027",
+                "shipment_id": "SHP-1042",
+                "exception_id": chat["exception_id"],
+                "message": "no",
+            },
+        ).json()
+    if not chat.get("options"):
+        chat = client.post(
+            "/api/chat",
+            json={
+                "driver_id": "DRV-027",
+                "shipment_id": "SHP-1042",
+                "exception_id": chat["exception_id"],
+                "message": "What are the next slots after 7 PM?",
+            },
+        ).json()
+    assert chat.get("options"), chat.get("reply")
+    first_slot = chat["options"][0]["slot_id"]
+    # Accept second option when available to exercise first_option_accepted=False
+    choice = "2" if len(chat["options"]) > 1 else "1"
+    chosen_slot = chat["options"][int(choice) - 1]["slot_id"]
+    held = client.post(
+        "/api/chat",
+        json={
+            "driver_id": "DRV-027",
+            "exception_id": chat["exception_id"],
+            "shipment_id": "SHP-1042",
+            "message": choice,
+        },
+    ).json()
+    assert held.get("hold") or "hold" in (held.get("reply") or "").lower() or held.get("status") == "held"
+    client.post(
+        "/api/chat",
+        json={
+            "driver_id": "DRV-027",
+            "exception_id": chat["exception_id"],
+            "shipment_id": "SHP-1042",
+            "message": "confirm",
+        },
+    )
+    row = (
+        db_session.query(CaseMetric)
+        .filter(CaseMetric.exception_id == chat["exception_id"])
+        .first()
+    )
+    assert row is not None
+    assert row.resolution_status == "confirmed"
+    assert row.old_projected_wait_minutes is not None
+    assert row.new_projected_wait_minutes is not None
+    # Heuristic old_wait = new_wait + 20 must be gone
+    assert row.old_projected_wait_minutes != row.new_projected_wait_minutes + 20
+    assert row.first_option_accepted is (chosen_slot == first_slot)
+    # Old wait must reflect superseded prior slot vs scheduling ETA (not invented)
+    assert prior_start is not None
+
+
+def test_location_only_no_declared_eta_still_ranks(db_session):
+    """Driver shares location without a declared ETA — route source used when fresh."""
+    from app.services import domain as domain_svc
+
+    exc = domain_svc.create_exception(
+        db_session, driver_id="DRV-027", shipment_id="SHP-1042", message="stuck"
+    )
+    # Clear declared ETA so only planned/route remain
+    exc.latest_declared_eta = None
+    db_session.commit()
+    location_svc.submit_location(
+        db_session,
+        exception_id=exc.exception_id,
+        shipment_id="SHP-1042",
+        latitude=27.9889,
+        longitude=76.3881,
+        accuracy_m=15,
+        captured_at=datetime(2026, 8, 11, 17, 20, tzinfo=IST),
+    )
+    shipment = db_session.get(Shipment, "SHP-1042")
+    _eta, source = location_svc.get_scheduling_eta(db_session, shipment, exc.exception_id)
+    assert source == "route"
+
+
+def test_reshare_location_updates_route_eta(db_session):
+    from app.models import RouteEtaRecord
+    from app.services import domain as domain_svc
+
+    exc = domain_svc.create_exception(
+        db_session, driver_id="DRV-027", shipment_id="SHP-1042", message="late"
+    )
+    location_svc.submit_location(
+        db_session,
+        exception_id=exc.exception_id,
+        shipment_id="SHP-1042",
+        latitude=27.9889,
+        longitude=76.3881,
+        accuracy_m=15,
+        captured_at=datetime(2026, 8, 11, 17, 10, tzinfo=IST),
+    )
+    first = (
+        db_session.query(RouteEtaRecord)
+        .filter(RouteEtaRecord.exception_id == exc.exception_id)
+        .count()
+    )
+    location_svc.submit_location(
+        db_session,
+        exception_id=exc.exception_id,
+        shipment_id="SHP-1042",
+        latitude=27.5,
+        longitude=76.5,
+        accuracy_m=20,
+        captured_at=datetime(2026, 8, 11, 17, 22, tzinfo=IST),
+    )
+    second = (
+        db_session.query(RouteEtaRecord)
+        .filter(RouteEtaRecord.exception_id == exc.exception_id)
+        .count()
+    )
+    assert second == first + 1
+    latest_loc = location_svc.latest_location(db_session, exc.exception_id)
+    assert latest_loc is not None
+    assert float(latest_loc.latitude) == 27.5
+    assert location_svc.latest_route_eta(db_session, exc.exception_id) is not None

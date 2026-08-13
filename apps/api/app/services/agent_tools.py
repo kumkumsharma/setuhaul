@@ -41,6 +41,7 @@ class AgentSession:
     escalated: bool = False
     client_action: str | None = None
     eta_comparison: dict[str, Any] | None = None
+    waiting_for_browser: bool = False
 
 
 _SESSION: ContextVar[AgentSession | None] = ContextVar("setuhaul_agent_session", default=None)
@@ -407,13 +408,25 @@ def _tool_confirm_hold(hold_id: str, idempotency_key: Optional[str] = None) -> s
     s.hold = _hold_dict(hold)
     s.appointment = domain.appointment_to_dict(s.db, appt)
     if s.exception_id:
-        metrics_svc.mark_resolved(
-            s.db,
-            s.exception_id,
-            status="confirmed",
-            human=False,
-            first_option_accepted=True,
-        )
+        shipment = domain.get_shipment(s.db, hold.shipment_id)
+        kwargs: dict[str, Any] = {"status": "confirmed", "human": False}
+        if shipment is not None:
+            confirm_m = metrics_svc.confirm_wait_and_first_option(
+                s.db,
+                shipment=shipment,
+                exception_id=s.exception_id,
+                new_appointment=appt,
+            )
+            kwargs.update(
+                {
+                    "first_option_accepted": confirm_m["first_option_accepted"],
+                    "eta_source_used": confirm_m["eta_source_used"],
+                    "predicted_eta": confirm_m["predicted_eta"],
+                    "old_wait": confirm_m["old_wait"],
+                    "new_wait": confirm_m["new_wait"],
+                }
+            )
+        metrics_svc.mark_resolved(s.db, s.exception_id, **kwargs)
     return _json({"hold": s.hold, "appointment": s.appointment, "lifecycle": "confirmed"})
 
 
@@ -445,6 +458,35 @@ def _tool_get_route_eta_context() -> str:
             "route_eta": route.route_eta if route else None,
             "provider": route.provider if route else None,
             "note": "Driver-declared and route ETAs are stored separately.",
+        }
+    )
+
+
+def _tool_request_browser_location() -> str:
+    """Pause for frontend one-time geolocation (Advanced AddOns PDF)."""
+    from app.services import location_consent
+
+    s = get_session()
+    _track("request_browser_location")
+    if not s.exception_id:
+        return _json({"error": "exception_id_required", "message": "Create an exception first."})
+    exc = s.db.get(DriverException, s.exception_id)
+    if not exc:
+        return _json({"error": "exception_not_found"})
+    result = location_consent.request_browser_location(s.db, exc)
+    s.client_action = "REQUEST_BROWSER_LOCATION"
+    s.waiting_for_browser = True
+    s.shipment_id = exc.shipment_id
+    return _json(
+        {
+            "client_action": "REQUEST_BROWSER_LOCATION",
+            "waiting_for_browser": True,
+            "message": result["reply"],
+            "instruction": (
+                "Stop and tell the driver to tap Share location. "
+                "Do not invent coordinates. Do not call list_feasible_slots until location "
+                "is shared or declined."
+            ),
         }
     )
 
@@ -537,6 +579,16 @@ def build_tools() -> list[StructuredTool]:
             func=_tool_get_route_eta_context,
             args_schema=EmptyArgs,
         ),
+        StructuredTool.from_function(
+            name="request_browser_location",
+            description=(
+                "Pause the workflow and ask the frontend for a one-time browser location "
+                "snapshot (REQUEST_BROWSER_LOCATION). Call this when the driver agrees to "
+                "share location. Do not invent coordinates."
+            ),
+            func=_tool_request_browser_location,
+            args_schema=EmptyArgs,
+        ),
     ]
 
 
@@ -554,4 +606,5 @@ TOOL_NAMES = [
     "confirm_hold",
     "release_hold",
     "get_route_eta_context",
+    "request_browser_location",
 ]

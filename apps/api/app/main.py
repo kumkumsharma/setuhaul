@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
+import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import allocation, chat, domain
 from app.config import get_settings
 from app.db import init_db
+from app.services import ops_log
 
 
 @asynccontextmanager
@@ -28,6 +30,26 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def ops_request_log(request: Request, call_next):
+        start = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            path = request.url.path
+            if path != "/health":
+                ops_log.record_event(
+                    kind="http",
+                    path=path,
+                    status_code=status_code,
+                    latency_ms=(time.perf_counter() - start) * 1000,
+                    outcome="ok" if status_code < 400 else "failure",
+                )
+
     app.include_router(domain.router)
     app.include_router(allocation.router)
     app.include_router(chat.router)

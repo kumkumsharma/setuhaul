@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Apply Alembic migrations only. Never drops tables or seeds demo data.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -14,7 +15,6 @@ if [[ -z "$PYTHON_BIN" ]]; then
   fi
 fi
 
-# Prefer a working 3.12 venv (.venv312) over a broken system .venv
 if [[ -x .venv312/bin/python ]]; then
   VENV_DIR=".venv312"
 elif [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import sys; raise SystemExit(0 if sys.version_info < (3,14) else 1)'; then
@@ -28,12 +28,14 @@ fi
 source "$VENV_DIR/bin/activate"
 pip install -q -r apps/api/requirements.txt
 
-mkdir -p data/runtime
-export PYTHONPATH="$ROOT/apps/api"
-export DATABASE_URL="${DATABASE_URL:-sqlite:///./data/runtime/setuhaul.db}"
-export REDIS_URL="${REDIS_URL:-fakeredis://}"
-export SCENARIO_NOW="${SCENARIO_NOW:-2026-08-11T17:25:00+05:30}"
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
 
-# Destructive local reset (drop_all). For RDS use: ./scripts/seed-demo.sh --demo
-python -m app.seed.load --destructive-reset
-echo "Database seeded at $DATABASE_URL (venv=$VENV_DIR)"
+export PYTHONPATH="$ROOT/apps/api"
+cd "$ROOT/apps/api"
+alembic -c alembic.ini upgrade head
+echo "Schema migrations applied (Alembic upgrade head)."

@@ -20,13 +20,38 @@ def get_redis() -> redis.Redis | fakeredis.FakeRedis:
     if url.startswith("fakeredis"):
         _client = fakeredis.FakeRedis(decode_responses=True)
     else:
-        _client = redis.Redis.from_url(url, decode_responses=True)
+        # Upstash (and other managed Redis) idle-closes TLS connections; health checks
+        # + short timeouts keep the pooled client usable across requests.
+        from redis.backoff import ExponentialBackoff
+        from redis.exceptions import ConnectionError as RedisConnectionError
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+        from redis.retry import Retry
+
+        _client = redis.Redis.from_url(
+            url,
+            decode_responses=True,
+            health_check_interval=30,
+            socket_connect_timeout=10,
+            socket_timeout=10,
+            socket_keepalive=True,
+            retry_on_timeout=True,
+            retry=Retry(
+                ExponentialBackoff(cap=2, base=0.1),
+                retries=3,
+                supported_errors=(RedisConnectionError, RedisTimeoutError),
+            ),
+        )
     return _client
 
 
 def reset_redis_client() -> None:
     """Test helper to force a fresh client."""
     global _client
+    if _client is not None:
+        try:
+            _client.close()
+        except Exception:
+            pass
     _client = None
 
 

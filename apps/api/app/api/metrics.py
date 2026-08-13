@@ -10,3 +10,9 @@ router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 @router.get("/summary")
 def metrics_summary(db: Session = Depends(get_db)):
     return metrics_svc.summary(db)
+
+
+@router.get("/ops")
+def metrics_ops(db: Session = Depends(get_db)):
+    """In-app ops/log summary (Advanced AddOns PDF — CloudWatch alternative)."""
+    return metrics_svc.ops_summary(db)

@@ -78,3 +78,8 @@ export async function fetchMetrics() {
   const res = await fetch(`${API_BASE}/api/metrics/summary`);
   return parse(res);
 }
+
+export async function fetchOpsSummary() {
+  const res = await fetch(`${API_BASE}/api/metrics/ops`);
+  return parse(res);
+}

@@ -90,7 +90,10 @@ def test_natural_language_delay_via_scripted_agent(db_session):
         db_session,
         driver_id="DRV-027",
         shipment_id="SHP-1042",
-        message="Tyre damaged near Neemrana. Around 90 minutes late. Can I get a slot after 7 PM?",
+        message=(
+            "Tyre damaged near Neemrana. Around 90 minutes late. "
+            "Skip location. Can I get a slot after 7 PM?"
+        ),
         model_factory=lambda: ScriptedModel(script),
     )
     assert result["exception_id"]
@@ -158,7 +161,7 @@ def test_no_feasible_slot_escalates(db_session):
         db_session,
         driver_id="DRV-NOP",
         shipment_id="SHP-NOP",
-        message="I will be late. What slots after 6 PM?",
+        message="I will be late. Skip location. What slots after 6 PM?",
         model_factory=lambda: ScriptedModel(script),
     )
     assert result["escalated"] is True
@@ -212,6 +215,48 @@ def test_hold_and_confirm_go_through_allocator(db_session):
         assert conf["lifecycle"] == "confirmed"
         assert conf["appointment"]["status"] == "confirmed"
         assert conf["appointment"]["slot_id"] == slot_id
+    finally:
+        reset_session(token)
+
+
+def test_llm_location_consent_offers_then_requests_browser(db_session):
+    """Gemini path: delay offers location; 'yes' returns REQUEST_BROWSER_LOCATION."""
+    first = handle_chat_llm(
+        db_session,
+        driver_id="DRV-027",
+        shipment_id="SHP-1042",
+        message="Tyre damaged near Neemrana. Repair may take 45 minutes.",
+        model_factory=lambda: ScriptedModel([AIMessage(content="should not run")]),
+    )
+    assert "share your current location" in first["reply"].lower()
+    assert first["client_action"] is None
+    assert first["options"] == []
+    assert first["exception_id"]
+
+    second = handle_chat_llm(
+        db_session,
+        driver_id="DRV-027",
+        shipment_id="SHP-1042",
+        exception_id=first["exception_id"],
+        message="yes",
+        model_factory=lambda: ScriptedModel([AIMessage(content="should not run")]),
+    )
+    assert second["client_action"] == "REQUEST_BROWSER_LOCATION"
+    assert second["waiting_for_browser"] is True
+    assert "Share location" in second["reply"] or "share location" in second["reply"].lower()
+
+
+def test_request_browser_location_tool(db_session):
+    from app.services.agent_tools import _tool_request_browser_location
+
+    session = AgentSession(db=db_session, driver_id="DRV-027", shipment_id="SHP-1042")
+    token = set_session(session)
+    try:
+        _tool_create_exception(shipment_id="SHP-1042", message="late")
+        raw = json.loads(_tool_request_browser_location())
+        assert raw["client_action"] == "REQUEST_BROWSER_LOCATION"
+        assert session.client_action == "REQUEST_BROWSER_LOCATION"
+        assert session.waiting_for_browser is True
     finally:
         reset_session(token)
 

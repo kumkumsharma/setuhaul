@@ -11,6 +11,7 @@ from app.services import location as location_svc
 from app.services import metrics as metrics_svc
 from app.services.chat import handle_chat
 from app.services.observability import trace_event
+from app.services import ops_log
 
 router = APIRouter(prefix="/api", tags=["location"])
 
@@ -45,6 +46,11 @@ def submit_browser_location(body: LocationSubmit, db: Session = Depends(get_db))
             exception_id=body.exception_id,
             shipment_id=shipment_id,
             status="denied" if body.denied else "error",
+        )
+        ops_log.record_event(
+            kind="domain",
+            outcome="location_failure",
+            detail=f"exception={body.exception_id} denied={body.denied}",
         )
         trace_event("location_denied_or_error", {"exception_id": body.exception_id})
         # Resume chat with declared-ETA workflow
@@ -89,6 +95,11 @@ def submit_browser_location(body: LocationSubmit, db: Session = Depends(get_db))
     follow["client_action"] = None
     follow["tools_used"] = list(follow.get("tools_used") or []) + ["submit_location", "route_eta"]
     if payload["stale"]:
+        ops_log.record_event(
+            kind="domain",
+            outcome="location_failure",
+            detail=f"exception={body.exception_id} stale=true",
+        )
         follow["reply"] = (
             "That location snapshot looks stale. Continuing with your declared ETA. "
             + follow.get("reply", "")
@@ -104,6 +115,11 @@ def submit_browser_location(body: LocationSubmit, db: Session = Depends(get_db))
             + follow.get("reply", "")
         )
     else:
+        ops_log.record_event(
+            kind="domain",
+            outcome="location_failure",
+            detail=f"exception={body.exception_id} routing_failed",
+        )
         follow["reply"] = (
             "Location received but routing failed — continuing with declared ETA. "
             + follow.get("reply", "")

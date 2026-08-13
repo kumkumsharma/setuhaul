@@ -20,8 +20,20 @@ def _ensure_sqlite_parent(url: str) -> None:
 settings = get_settings()
 _ensure_sqlite_parent(settings.database_url)
 
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+connect_args: dict = {}
+_engine_kwargs: dict = {"future": True}
+if settings.database_url.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+else:
+    # Bound waits so a stalled RDS socket cannot hang request workers forever.
+    connect_args = {"connect_timeout": 10}
+    _engine_kwargs.update(
+        pool_pre_ping=True,
+        pool_reset_on_return="rollback",
+        pool_recycle=300,
+    )
+_engine_kwargs["connect_args"] = connect_args
+engine = create_engine(settings.database_url, **_engine_kwargs)
 
 if settings.database_url.startswith("sqlite"):
 
@@ -44,6 +56,8 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
+    """Local SQLite convenience only. Postgres/RDS schema is owned by Alembic."""
     from app import models  # noqa: F401
 
-    Base.metadata.create_all(bind=engine)
+    if settings.database_url.startswith("sqlite"):
+        Base.metadata.create_all(bind=engine)

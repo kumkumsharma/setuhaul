@@ -40,6 +40,10 @@ Rules:
 - When holding, pass the exact slot_id returned by list_feasible_slots.
 - Prefer short, practical driver-facing language.
 - You may extract delay minutes and preferred times from free text, then store them via tools.
+- Location sharing is optional. For a new delay, ask once whether the driver wants to share a
+  one-time browser location. If they agree, call request_browser_location and STOP — do not
+  invent coordinates and do not list slots until the frontend returns a result or the driver
+  declines. If they decline or skip, continue with the declared ETA and list_feasible_slots.
 """
 
 
@@ -169,6 +173,35 @@ def handle_chat_llm(
 
     configure_langsmith_env()
 
+    from app.services import location_consent
+    from app.services.location_consent import looks_like_delay_report
+
+    # Bootstrap open exception when shipment is known (needed for location consent gate)
+    exc: DriverException | None = None
+    if exception_id:
+        exc = db.get(DriverException, exception_id)
+    if exc is None and shipment_id:
+        exc = domain.get_open_exception(db, driver_id, shipment_id)
+        if exc is None and looks_like_delay_report(message):
+            exc = domain.create_exception(
+                db,
+                driver_id=driver_id,
+                shipment_id=shipment_id,
+                exception_type="delay",
+                message=message,
+            )
+            from app.services import metrics as metrics_svc
+
+            metrics_svc.ensure_case_metric(db, exc.exception_id, shipment_id)
+        if exc is not None:
+            exception_id = exc.exception_id
+
+    gated = location_consent.evaluate_llm_location_gate(db, message=message, exception=exc)
+    if gated is not None:
+        if idempotency_key:
+            allocator.store_idempotent_result(f"chat:{idempotency_key}", gated)
+        return gated
+
     session = AgentSession(
         db=db,
         driver_id=driver_id,
@@ -216,9 +249,9 @@ def handle_chat_llm(
 
         status = "open"
         if session.exception_id:
-            exc = db.get(DriverException, session.exception_id)
-            if exc:
-                status = exc.status
+            exc_row = db.get(DriverException, session.exception_id)
+            if exc_row:
+                status = exc_row.status
         if session.escalated:
             status = "escalated"
         elif session.hold and session.hold.get("status") == "confirmed":
@@ -229,6 +262,11 @@ def handle_chat_llm(
             status = "awaiting_choice"
 
         tools_used = list(dict.fromkeys(session.tools_used + turn_tools))
+        # If the model requested browser location, prefer that interrupt over options
+        if session.client_action == "REQUEST_BROWSER_LOCATION":
+            session.options = []
+            session.waiting_for_browser = True
+
         result = {
             "exception_id": session.exception_id or exception_id or "",
             "shipment_id": session.shipment_id or shipment_id or "",
@@ -242,7 +280,7 @@ def handle_chat_llm(
             "tools_used": tools_used,
             "client_action": session.client_action,
             "eta_comparison": session.eta_comparison,
-            "waiting_for_browser": False,
+            "waiting_for_browser": session.waiting_for_browser,
         }
         if idempotency_key:
             allocator.store_idempotent_result(f"chat:{idempotency_key}", result)
@@ -253,6 +291,7 @@ def handle_chat_llm(
                 "tools_used": tools_used,
                 "escalated": result["escalated"],
                 "options": len(result["options"]),
+                "client_action": result.get("client_action"),
             },
         )
         return result
