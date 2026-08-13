@@ -1,4 +1,4 @@
-"""Gemini + LangChain conversational layer for SetuHaul.
+"""OpenRouter (or legacy Gemini) + LangChain conversational layer for SetuHaul.
 
 Operational truth remains in feasibility/allocator tools. The LLM only:
 understands language, chooses tools, and explains tool results.
@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -47,9 +47,16 @@ Rules:
 """
 
 
-def gemini_configured() -> bool:
+def llm_configured() -> bool:
     settings = get_settings()
+    if settings.openrouter_api_key and settings.openrouter_api_key.strip():
+        return True
     return bool(settings.gemini_api_key and settings.gemini_api_key.strip())
+
+
+def gemini_configured() -> bool:
+    """Backward-compatible alias: True when any LLM provider is configured."""
+    return llm_configured()
 
 
 def _load_history(db: Session, exception_id: str | None) -> list:
@@ -72,6 +79,23 @@ def _load_history(db: Session, exception_id: str | None) -> list:
 
 def _build_model():
     settings = get_settings()
+    if settings.openrouter_api_key and settings.openrouter_api_key.strip():
+        # OpenAI-compatible OpenRouter endpoint. Prefer gpt-4o-mini (or similar)
+        # for reliable multi-turn tool calling; Gemini 3.x via OpenRouter is avoided
+        # because thought_signature is stripped and breaks tool loops.
+        return ChatOpenAI(
+            model=settings.openrouter_model,
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            temperature=0.2,
+            default_headers={
+                "HTTP-Referer": "https://setuhaul-web.vercel.app",
+                "X-Title": "SetuHaul",
+            },
+        )
+    # Trivial legacy path when only GEMINI_API_KEY is set.
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
     return ChatGoogleGenerativeAI(
         model=settings.gemini_model,
         google_api_key=settings.gemini_api_key,
@@ -168,8 +192,8 @@ def handle_chat_llm(
         if cached:
             return cached
 
-    if not gemini_configured() and model_factory is None:
-        raise RuntimeError("GEMINI_API_KEY not configured")
+    if not llm_configured() and model_factory is None:
+        raise RuntimeError("OPENROUTER_API_KEY (or GEMINI_API_KEY) not configured")
 
     configure_langsmith_env()
 
@@ -309,7 +333,7 @@ def handle_chat_with_fallback(
     idempotency_key: str | None = None,
     model_factory: Callable | None = None,
 ) -> dict[str, Any]:
-    """Use Gemini when configured; otherwise / on failure use rule-based handle_chat."""
+    """Use OpenRouter/Gemini when configured; otherwise / on failure use rule-based handle_chat."""
 
     from app.services.chat import handle_chat, resolve_shipment_from_message
 
@@ -329,7 +353,7 @@ def handle_chat_with_fallback(
         ):
             exception_id = None
 
-    if gemini_configured() or model_factory is not None:
+    if llm_configured() or model_factory is not None:
         try:
             return handle_chat_llm(
                 db,

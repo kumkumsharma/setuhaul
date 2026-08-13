@@ -35,7 +35,11 @@ class Settings(BaseSettings):
     langsmith_project: str = "setuhaul-fde"
     langsmith_tracing: bool = False
 
-    # Gemini conversational agent (optional — rules fallback when empty)
+    # Conversational agent via OpenRouter (optional — rules fallback when empty)
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openai/gpt-4o-mini"
+
+    # Legacy direct Gemini (used only when OPENROUTER_API_KEY is unset)
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
 

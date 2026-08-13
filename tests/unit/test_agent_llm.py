@@ -261,12 +261,13 @@ def test_request_browser_location_tool(db_session):
         reset_session(token)
 
 
-def test_fallback_without_gemini_key(db_session, monkeypatch):
-    """Without GEMINI_API_KEY, rules path remains fully functional."""
+def test_fallback_without_llm_key(db_session, monkeypatch):
+    """Without OPENROUTER_API_KEY / GEMINI_API_KEY, rules path remains fully functional."""
 
     from app.config import get_settings
 
     get_settings.cache_clear()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
     monkeypatch.setenv("GEMINI_API_KEY", "")
     get_settings.cache_clear()
 

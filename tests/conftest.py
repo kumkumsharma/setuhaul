@@ -38,6 +38,7 @@ if USE_EXTERNAL:
     os.environ["GEOAPIFY_API_KEY"] = ""
     os.environ["LOCATION_STALE_MINUTES"] = "30"
     # Keep chat tests on deterministic rules path
+    os.environ["OPENROUTER_API_KEY"] = ""
     os.environ["GEMINI_API_KEY"] = ""
     os.environ["LANGSMITH_TRACING"] = "false"
 else:
@@ -49,6 +50,7 @@ else:
     os.environ["GEOAPIFY_MOCK"] = "true"
     os.environ["GEOAPIFY_API_KEY"] = ""
     os.environ["LOCATION_STALE_MINUTES"] = "30"
+    os.environ["OPENROUTER_API_KEY"] = ""
     os.environ["GEMINI_API_KEY"] = ""
     os.environ["LANGSMITH_TRACING"] = "false"
 
