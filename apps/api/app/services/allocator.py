@@ -132,6 +132,17 @@ def mark_options_shown(
         metrics_svc.mark_options_generated(db, exception.exception_id)
     except Exception:  # noqa: BLE001
         pass
+    from app.services.observability import log_event
+
+    shown = sum(1 for o in options if o.get("lifecycle") == "shown")
+    log_event(
+        "options_shown",
+        exception_id=exception.exception_id,
+        driver_id=exception.driver_id,
+        shipment_id=shipment.shipment_id,
+        options_count=shown,
+        status=exception.status,
+    )
     return options
 
 
@@ -249,6 +260,17 @@ def create_hold(
     db.commit()
     db.refresh(hold)
     store_idempotent_result(idempotency_key, {"hold_id": hold.hold_id, "status": hold.status})
+    from app.services.observability import log_event
+
+    log_event(
+        "hold_created",
+        exception_id=exception_id,
+        driver_id=exception.driver_id if exception else None,
+        shipment_id=shipment.shipment_id,
+        hold_id=hold.hold_id,
+        slot_id=slot_id,
+        status=hold.status,
+    )
     return hold
 
 
@@ -361,6 +383,18 @@ def confirm_hold(
             "appointment_id": appointment.appointment_id,
             "status": "confirmed",
         },
+    )
+    from app.services.observability import log_event
+
+    log_event(
+        "hold_confirmed",
+        exception_id=hold.exception_id,
+        driver_id=exception.driver_id if exception else None,
+        shipment_id=hold.shipment_id,
+        hold_id=hold.hold_id,
+        slot_id=hold.slot_id,
+        appointment_id=appointment.appointment_id,
+        status="confirmed",
     )
     return hold, appointment
 

@@ -185,6 +185,17 @@ def mark_resolved(
             detail=f"exception={exception_id}",
         )
 
+    if status == "escalated":
+        from app.services.observability import log_event
+
+        log_event(
+            "escalation",
+            exception_id=exception_id,
+            shipment_id=row.shipment_id,
+            status=status,
+            human=bool(human or status == "escalated"),
+        )
+
 
 def summary(db: Session) -> dict[str, Any]:
     cases = db.query(CaseMetric).all()

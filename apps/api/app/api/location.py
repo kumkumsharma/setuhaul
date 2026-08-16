@@ -10,7 +10,7 @@ from app.models import DriverException, Shipment
 from app.services import location as location_svc
 from app.services import metrics as metrics_svc
 from app.services.chat import handle_chat
-from app.services.observability import trace_event
+from app.services.observability import log_event
 from app.services import ops_log
 
 router = APIRouter(prefix="/api", tags=["location"])
@@ -52,7 +52,13 @@ def submit_browser_location(body: LocationSubmit, db: Session = Depends(get_db))
             outcome="location_failure",
             detail=f"exception={body.exception_id} denied={body.denied}",
         )
-        trace_event("location_denied_or_error", {"exception_id": body.exception_id})
+        log_event(
+            "location_failure" if body.error else "location_declined",
+            exception_id=body.exception_id,
+            driver_id=exc.driver_id,
+            shipment_id=shipment_id,
+            reason="error" if body.error else "denied",
+        )
         # Resume chat with declared-ETA workflow
         result = handle_chat(
             db,
@@ -74,13 +80,13 @@ def submit_browser_location(body: LocationSubmit, db: Session = Depends(get_db))
         accuracy_m=body.accuracy_m,
         captured_at=body.captured_at,
     )
-    trace_event(
+    log_event(
         "location_submitted",
-        {
-            "exception_id": body.exception_id,
-            "stale": payload["stale"],
-            "route_ok": bool(payload["comparison"].get("ok")),
-        },
+        exception_id=body.exception_id,
+        driver_id=exc.driver_id,
+        shipment_id=shipment_id,
+        stale=payload["stale"],
+        route_ok=bool(payload["comparison"].get("ok")),
     )
 
     # Resume conversation: re-ask for options with route-aware ranking
@@ -99,6 +105,14 @@ def submit_browser_location(body: LocationSubmit, db: Session = Depends(get_db))
             kind="domain",
             outcome="location_failure",
             detail=f"exception={body.exception_id} stale=true",
+        )
+        log_event(
+            "location_failure",
+            exception_id=body.exception_id,
+            driver_id=exc.driver_id,
+            shipment_id=shipment_id,
+            reason="stale",
+            stale=True,
         )
         follow["reply"] = (
             "That location snapshot looks stale. Continuing with your declared ETA. "
@@ -120,6 +134,14 @@ def submit_browser_location(body: LocationSubmit, db: Session = Depends(get_db))
             outcome="location_failure",
             detail=f"exception={body.exception_id} routing_failed",
         )
+        log_event(
+            "location_failure",
+            exception_id=body.exception_id,
+            driver_id=exc.driver_id,
+            shipment_id=shipment_id,
+            reason="routing_failed",
+            route_ok=False,
+        )
         follow["reply"] = (
             "Location received but routing failed — continuing with declared ETA. "
             + follow.get("reply", "")
@@ -138,6 +160,13 @@ def decline_location(body: LocationDecline, db: Session = Depends(get_db)):
         exception_id=body.exception_id,
         shipment_id=shipment_id,
         status="denied",
+    )
+    log_event(
+        "location_declined",
+        exception_id=body.exception_id,
+        driver_id=exc.driver_id,
+        shipment_id=shipment_id,
+        reason=body.reason,
     )
     result = handle_chat(
         db,

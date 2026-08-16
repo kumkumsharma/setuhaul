@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Facility, SchedulingRun
-from app.services.observability import trace_event
+from app.services.observability import log_event
 from app.services.scheduler import propose_schedule, run_to_dict
 
 router = APIRouter(prefix="/api/scheduling", tags=["scheduling"])
@@ -15,7 +15,12 @@ def run_facility_schedule(facility_id: str, db: Session = Depends(get_db)):
     if not facility:
         raise HTTPException(404, "Facility not found")
     run = propose_schedule(db, facility_id)
-    trace_event("scheduling_run", {"facility_id": facility_id, "run_id": run.run_id})
+    log_event(
+        "scheduling_run",
+        facility_id=facility_id,
+        run_id=run.run_id,
+        status="ok",
+    )
     return run_to_dict(run)
 
 

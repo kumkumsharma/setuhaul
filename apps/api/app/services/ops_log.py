@@ -1,8 +1,8 @@
-"""In-process ops/log summary (Advanced PDF §2 CloudWatch alternative).
+"""In-process ops/log summary for the local demo metrics UI.
 
-Bounded ring buffer of recent API + domain events for a small demo dashboard.
-Not a replacement for CloudWatch in production — satisfies the PDF's
-"CloudWatch or application logs" option without new infrastructure.
+Bounded ring buffer of recent API + domain events. Separate from production
+CloudWatch logging: structured JSON on stdout is handled by
+`app.services.observability` (ECS log driver → CloudWatch Logs).
 """
 
 from __future__ import annotations
@@ -79,7 +79,8 @@ def snapshot(limit: int = 40) -> dict[str, Any]:
         "location_failures": location_fail,
         "recent": list(reversed(rows[-limit:])),
         "note": (
-            "In-app application-log summary (Advanced AddOns PDF). "
-            "Use alongside LangSmith traces; not AWS CloudWatch."
+            "In-process demo ops buffer (not CloudWatch). "
+            "Production app logs are structured JSON on stdout → ECS CloudWatch Logs; "
+            "use alongside LangSmith for agent/LLM traces."
         ),
     }

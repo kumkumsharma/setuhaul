@@ -179,6 +179,15 @@ def create_exception(
 
     db.commit()
     db.refresh(exception)
+    from app.services.observability import log_event
+
+    log_event(
+        "exception_opened",
+        exception_id=exception.exception_id,
+        driver_id=driver_id,
+        shipment_id=shipment_id,
+        status=exception.status,
+    )
     return exception
 
 
