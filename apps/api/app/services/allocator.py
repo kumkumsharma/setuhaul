@@ -260,7 +260,7 @@ def create_hold(
     db.commit()
     db.refresh(hold)
     store_idempotent_result(idempotency_key, {"hold_id": hold.hold_id, "status": hold.status})
-    from app.services.observability import log_event
+    from app.services.observability import emit_business_count_metric, log_event
 
     log_event(
         "hold_created",
@@ -271,6 +271,10 @@ def create_hold(
         slot_id=slot_id,
         status=hold.status,
     )
+    try:
+        emit_business_count_metric("HoldsCreated")
+    except Exception:  # noqa: BLE001
+        pass
     return hold
 
 
@@ -384,7 +388,7 @@ def confirm_hold(
             "status": "confirmed",
         },
     )
-    from app.services.observability import log_event
+    from app.services.observability import emit_business_count_metric, log_event
 
     log_event(
         "hold_confirmed",
@@ -396,6 +400,10 @@ def confirm_hold(
         appointment_id=appointment.appointment_id,
         status="confirmed",
     )
+    try:
+        emit_business_count_metric("HoldsConfirmed")
+    except Exception:  # noqa: BLE001
+        pass
     return hold, appointment
 
 

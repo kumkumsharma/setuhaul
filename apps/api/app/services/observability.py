@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from contextvars import ContextVar
@@ -29,7 +30,9 @@ _SAFE_KEYS = frozenset(
         "request_id",
         "method",
         "path",
+        "path_group",
         "status_code",
+        "status_class",
         "latency_ms",
         "outcome",
         "exception_id",
@@ -52,12 +55,45 @@ _SAFE_KEYS = frozenset(
         "options",
         "client_action",
         "error",
+        "environment",
+        "provider",
     }
+)
+
+# Low-cardinality CloudWatch metric dimensions only (never per-request/entity IDs).
+_METRIC_DIM_KEYS = frozenset(
+    {"environment", "provider", "method", "path_group", "outcome", "status_class"}
+)
+_FORBIDDEN_METRIC_DIM_KEYS = frozenset(
+    {
+        "request_id",
+        "driver_id",
+        "shipment_id",
+        "exception_id",
+        "hold_id",
+        "slot_id",
+        "appointment_id",
+        "facility_id",
+        "run_id",
+        "path",  # use path_group only
+    }
+)
+
+CW_METRICS_NAMESPACE = "SetuHaul/API"
+
+_ID_SEGMENT_RE = re.compile(
+    r"^(?:"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|(?:EXC|HOLD|SHP|DRV|FAC|SLOT|APT|MET|RUN|VIEW|LOC|ETA|MSG|DOCK|RULE|VEH|CONTACT|BASE)"
+    r"-[A-Za-z0-9]+"
+    r"|[A-Z]{2,}[-_][A-Za-z0-9]+"
+    r")$",
+    re.IGNORECASE,
 )
 
 
 class JsonLogFormatter(logging.Formatter):
-    """Emit one JSON object per log line for CloudWatch Logs Insights."""
+    """Emit one JSON object per log line for CloudWatch Logs Insights (+ optional EMF)."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -74,6 +110,10 @@ class JsonLogFormatter(logging.Formatter):
         else:
             payload["event"] = "log"
             payload["message"] = record.getMessage()
+        emf = getattr(record, "setuhaul_emf", None)
+        if isinstance(emf, dict):
+            # EMF properties (_aws, metric values, dimension keys) sit alongside log fields.
+            payload.update(emf)
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str, separators=(",", ":"))
@@ -141,6 +181,113 @@ def log_event(event: str, *, level: int = logging.INFO, **fields: Any) -> None:
     )
 
 
+def environment_label() -> str:
+    try:
+        return (get_settings().app_env or "local").strip() or "local"
+    except Exception:  # noqa: BLE001
+        return "local"
+
+
+def status_class_for(status_code: int) -> str:
+    if 200 <= status_code < 300:
+        return "2xx"
+    if 400 <= status_code < 500:
+        return "4xx"
+    if 500 <= status_code < 600:
+        return "5xx"
+    return "other"
+
+
+def normalize_path_group(path: str) -> str:
+    """Replace dynamic ID path segments with '*' for low-cardinality metrics."""
+    if not path:
+        return "/"
+    raw = path.split("?")[0]
+    parts = raw.split("/")
+    out: list[str] = []
+    for part in parts:
+        if part == "":
+            out.append(part)
+            continue
+        if _ID_SEGMENT_RE.match(part):
+            out.append("*")
+        else:
+            out.append(part)
+    grouped = "/".join(out)
+    if not grouped.startswith("/"):
+        grouped = "/" + grouped
+    # Collapse accidental duplicate slashes except root
+    while "//" in grouped:
+        grouped = grouped.replace("//", "/")
+    return grouped if grouped else "/"
+
+
+def _metric_dimensions(dimensions: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in dimensions.items():
+        if value is None or value == "":
+            continue
+        if key in _FORBIDDEN_METRIC_DIM_KEYS:
+            continue
+        if key not in _METRIC_DIM_KEYS:
+            continue
+        out[key] = str(value)
+    return out
+
+
+def emit_emf(
+    *,
+    event: str,
+    metrics: list[tuple[str, float, str]],
+    dimensions: dict[str, Any],
+    log_fields: dict[str, Any] | None = None,
+    level: int = logging.INFO,
+) -> None:
+    """Emit one readable structured log line that also carries CloudWatch EMF.
+
+    Fail-open: never raises to callers. Does not call PutMetricData.
+    High-cardinality IDs may appear in log_fields only — never as metric dimensions.
+    """
+    try:
+        dims = _metric_dimensions(dimensions)
+        metric_defs = [{"Name": name, "Unit": unit} for name, _value, unit in metrics]
+        # Stable dimension set order for CloudWatch.
+        dim_names = sorted(dims.keys())
+        emf_block: dict[str, Any] = {
+            **dims,
+            **{name: value for name, value, _unit in metrics},
+            "_aws": {
+                "Timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+                "CloudWatchMetrics": [
+                    {
+                        "Namespace": CW_METRICS_NAMESPACE,
+                        "Dimensions": [dim_names] if dim_names else [[]],
+                        "Metrics": metric_defs,
+                    }
+                ],
+            },
+        }
+        data = _sanitize(log_fields or {})
+        rid = get_request_id()
+        if rid:
+            data.setdefault("request_id", rid)
+        logger.log(
+            level,
+            event,
+            extra={
+                "setuhaul_event": event,
+                "setuhaul_fields": data,
+                "setuhaul_emf": emf_block,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        try:
+            # Fall back to plain structured log without metrics.
+            log_event(event, **(log_fields or {}))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def log_request_complete(
     *,
     request_id: str,
@@ -150,14 +297,84 @@ def log_request_complete(
     latency_ms: float,
     outcome: str,
 ) -> None:
-    log_event(
-        "http_request",
-        request_id=request_id,
-        method=method,
-        path=path,
-        status_code=status_code,
-        latency_ms=round(latency_ms, 1),
-        outcome=outcome,
+    """Phase B http_request log + RequestCount/RequestErrors/RequestLatency EMF."""
+    path_group = normalize_path_group(path)
+    latency = round(latency_ms, 1)
+    status_class = status_class_for(status_code)
+    metrics: list[tuple[str, float, str]] = [
+        ("RequestCount", 1.0, "Count"),
+        ("RequestLatency", latency, "Milliseconds"),
+    ]
+    if outcome == "failure" or status_code >= 400:
+        metrics.append(("RequestErrors", 1.0, "Count"))
+    emit_emf(
+        event="http_request",
+        metrics=metrics,
+        dimensions={
+            "environment": environment_label(),
+            "method": (method or "GET").upper(),
+            "path_group": path_group,
+            "outcome": outcome,
+            "status_class": status_class,
+        },
+        log_fields={
+            "request_id": request_id,
+            "method": (method or "GET").upper(),
+            "path": path,
+            "path_group": path_group,
+            "status_code": status_code,
+            "status_class": status_class,
+            "latency_ms": latency,
+            "outcome": outcome,
+            "environment": environment_label(),
+        },
+    )
+
+
+def emit_agent_invocation_metrics(*, latency_ms: float, provider: str | None = None) -> None:
+    prov = provider or resolve_llm_provider_model()[0]
+    dims: dict[str, Any] = {"environment": environment_label()}
+    if prov and prov != "none":
+        dims["provider"] = prov
+    emit_emf(
+        event="agent_metrics",
+        metrics=[
+            ("AgentInvocations", 1.0, "Count"),
+            ("AgentLatency", round(latency_ms, 1), "Milliseconds"),
+        ],
+        dimensions=dims,
+        log_fields={
+            "environment": environment_label(),
+            "provider": prov if prov != "none" else None,
+            "latency_ms": round(latency_ms, 1),
+        },
+    )
+
+
+def emit_agent_error_metric(*, provider: str | None = None) -> None:
+    prov = provider or resolve_llm_provider_model()[0]
+    dims: dict[str, Any] = {"environment": environment_label()}
+    if prov and prov != "none":
+        dims["provider"] = prov
+    emit_emf(
+        event="agent_metrics",
+        metrics=[("AgentErrors", 1.0, "Count")],
+        dimensions=dims,
+        log_fields={
+            "environment": environment_label(),
+            "provider": prov if prov != "none" else None,
+            "outcome": "failure",
+        },
+    )
+
+
+def emit_business_count_metric(metric_name: str) -> None:
+    """HoldsCreated / HoldsConfirmed / Escalations — environment dimension only."""
+    emit_emf(
+        event="business_metrics",
+        metrics=[(metric_name, 1.0, "Count")],
+        dimensions={"environment": environment_label()},
+        log_fields={"environment": environment_label()},
     )
 
 

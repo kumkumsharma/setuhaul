@@ -6,6 +6,7 @@ understands language, chooses tools, and explains tool results.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -25,6 +26,8 @@ from app.services.observability import (
     build_langsmith_run_metadata,
     build_langsmith_run_tags,
     configure_langsmith_env,
+    emit_agent_error_metric,
+    emit_agent_invocation_metrics,
     langsmith_tracing_enabled,
     resolve_llm_provider_model,
     trace_event,
@@ -274,6 +277,7 @@ def handle_chat_llm(
             "agent_llm_start",
             {"driver_id": driver_id, "exception_id": exception_id, "shipment_id": shipment_id},
         )
+        agent_t0 = time.perf_counter()
         reply, turn_tools = run_tool_loop(
             model=model,
             tools=tools,
@@ -282,6 +286,7 @@ def handle_chat_llm(
             exception_id=exception_id or session.exception_id,
             shipment_id=shipment_id or session.shipment_id,
         )
+        agent_latency_ms = (time.perf_counter() - agent_t0) * 1000.0
         if not reply:
             reply = "I processed your request using operational tools."
 
@@ -338,6 +343,7 @@ def handle_chat_llm(
         }
         if idempotency_key:
             allocator.store_idempotent_result(f"chat:{idempotency_key}", result)
+        provider, _model = resolve_llm_provider_model()
         trace_event(
             "agent_llm_complete",
             {
@@ -346,8 +352,13 @@ def handle_chat_llm(
                 "escalated": result["escalated"],
                 "options": len(result["options"]),
                 "client_action": result.get("client_action"),
+                "latency_ms": round(agent_latency_ms, 1),
             },
         )
+        try:
+            emit_agent_invocation_metrics(latency_ms=agent_latency_ms, provider=provider)
+        except Exception:  # noqa: BLE001
+            pass
         return result
     finally:
         reset_session(token)
@@ -396,6 +407,10 @@ def handle_chat_with_fallback(
             )
         except Exception as exc:  # noqa: BLE001
             trace_event("agent_llm_fallback", {"error": str(exc)})
+            try:
+                emit_agent_error_metric()
+            except Exception:  # noqa: BLE001
+                pass
             # fall through
 
     return handle_chat(

@@ -186,7 +186,7 @@ def mark_resolved(
         )
 
     if status == "escalated":
-        from app.services.observability import log_event
+        from app.services.observability import emit_business_count_metric, log_event
 
         log_event(
             "escalation",
@@ -195,6 +195,10 @@ def mark_resolved(
             status=status,
             human=bool(human or status == "escalated"),
         )
+        try:
+            emit_business_count_metric("Escalations")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def summary(db: Session) -> dict[str, Any]:

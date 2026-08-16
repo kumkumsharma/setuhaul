@@ -9,6 +9,7 @@ import {
   submitLocation,
 } from "./api/client.js";
 import { shouldApplyInFlightChatResult } from "./chatRequestGuard.js";
+import { formatRateAsPercent } from "./formatMetrics.js";
 
 const DEMO_DRIVERS = [
   { id: "DRV-027", label: "Ravi Kumar (tyre / Neemrana)" },
@@ -566,13 +567,17 @@ export default function App() {
                   <li>Avg resolution: {metrics.after_solution.avg_resolution_minutes ?? "—"} min</li>
                   <li>
                     Human help:{" "}
-                    {metrics.after_solution.human_help_rate != null
-                      ? `${(metrics.after_solution.human_help_rate * 100).toFixed(0)}%`
-                      : "—"}
+                    {formatRateAsPercent(metrics.after_solution.human_help_rate)}
                   </li>
-                  <li>Self-service: {metrics.after_solution.self_service_rate ?? "—"}</li>
+                  <li>
+                    Self-service:{" "}
+                    {formatRateAsPercent(metrics.after_solution.self_service_rate)}
+                  </li>
                   <li>ETA error: {metrics.after_solution.avg_eta_error_minutes ?? "—"} min</li>
-                  <li>First-option accept: {metrics.after_solution.first_option_accept_rate ?? "—"}</li>
+                  <li>
+                    First-option accept:{" "}
+                    {formatRateAsPercent(metrics.after_solution.first_option_accept_rate)}
+                  </li>
                   <li>Wait reduced: {metrics.after_solution.avg_wait_reduced_minutes ?? "—"} min</li>
                 </ul>
               </div>
