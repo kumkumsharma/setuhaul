@@ -10,6 +10,7 @@ from app.db import init_db
 from app.services import ops_log
 from app.services.observability import (
     configure_logging,
+    configure_langsmith_env,
     log_request_complete,
     new_request_id,
     reset_request_id,
@@ -20,6 +21,10 @@ from app.services.observability import (
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
+    try:
+        configure_langsmith_env()
+    except Exception:  # noqa: BLE001
+        pass
     init_db()
     yield
 
@@ -27,6 +32,10 @@ async def lifespan(_: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging()
+    try:
+        configure_langsmith_env()
+    except Exception:  # noqa: BLE001
+        pass
     app = FastAPI(
         title="SetuHaul Driver Exception API",
         version="0.1.0",

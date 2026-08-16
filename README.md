@@ -68,9 +68,11 @@ Tracing is off unless configured. Leave keys empty for local runs.
 LANGSMITH_API_KEY=
 LANGSMITH_PROJECT=setuhaul-fde
 LANGSMITH_TRACING=false
+APP_ENV=local
+GIT_SHA=
 ```
 
-Set `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` to emit LangChain/LangSmith traces around agent runs. Absence of LangSmith never blocks chat.
+Set `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` to emit LangChain/LangSmith traces around agent runs. Absence of LangSmith never blocks chat. Filter traces by root metadata `request_id` to match CloudWatch JSON logs from the same HTTP request. Optional `APP_ENV` / `GIT_SHA` appear on the root run when set.
 
 ## Manual configuration
 

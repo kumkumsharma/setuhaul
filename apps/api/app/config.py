@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     langsmith_api_key: str = ""
     langsmith_project: str = "setuhaul-fde"
     langsmith_tracing: bool = False
+    # Optional deploy/runtime labels for LangSmith metadata (never hard-code git SHA)
+    app_env: str = "local"
+    git_sha: str = ""
 
     # Conversational agent via OpenRouter (optional — rules fallback when empty)
     openrouter_api_key: str = ""

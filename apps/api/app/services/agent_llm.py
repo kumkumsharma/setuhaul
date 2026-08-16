@@ -21,7 +21,14 @@ from app.services.agent_tools import (
     reset_session,
     set_session,
 )
-from app.services.observability import configure_langsmith_env, langsmith_tracing_enabled, trace_event
+from app.services.observability import (
+    build_langsmith_run_metadata,
+    build_langsmith_run_tags,
+    configure_langsmith_env,
+    langsmith_tracing_enabled,
+    resolve_llm_provider_model,
+    trace_event,
+)
 
 
 SYSTEM_PROMPT = """You are a SetuHaul driver operations assistant.
@@ -121,10 +128,13 @@ def run_tool_loop(
     tools,
     messages: list,
     max_iters: int = 8,
+    driver_id: str | None = None,
+    exception_id: str | None = None,
+    shipment_id: str | None = None,
 ) -> tuple[str, list[str]]:
     """Simple tool-calling loop. Returns final assistant text + tool names used this turn.
 
-    When LangSmith tracing is enabled, this parent run plus nested Gemini
+    When LangSmith tracing is enabled, this parent run plus nested model
     `invoke` and StructuredTool `invoke` calls form the LangSmith trace tree.
     """
 
@@ -163,10 +173,20 @@ def run_tool_loop(
         try:
             from langsmith import traceable
 
+            provider, model_name = resolve_llm_provider_model()
+            metadata = build_langsmith_run_metadata(
+                driver_id=driver_id,
+                exception_id=exception_id,
+                shipment_id=shipment_id,
+                provider=provider,
+                model=model_name or None,
+            )
+            tags = build_langsmith_run_tags(provider=provider)
             traced = traceable(
                 name="setuhaul_driver_agent",
                 run_type="chain",
-                metadata={"component": "agent_llm"},
+                metadata=metadata,
+                tags=tags,
             )(_loop)
             return traced()
         except Exception:  # noqa: BLE001
@@ -195,7 +215,10 @@ def handle_chat_llm(
     if not llm_configured() and model_factory is None:
         raise RuntimeError("OPENROUTER_API_KEY (or GEMINI_API_KEY) not configured")
 
-    configure_langsmith_env()
+    try:
+        configure_langsmith_env()
+    except Exception:  # noqa: BLE001
+        pass
 
     from app.services import location_consent
     from app.services.location_consent import looks_like_delay_report
@@ -251,7 +274,14 @@ def handle_chat_llm(
             "agent_llm_start",
             {"driver_id": driver_id, "exception_id": exception_id, "shipment_id": shipment_id},
         )
-        reply, turn_tools = run_tool_loop(model=model, tools=tools, messages=messages)
+        reply, turn_tools = run_tool_loop(
+            model=model,
+            tools=tools,
+            messages=messages,
+            driver_id=driver_id,
+            exception_id=exception_id or session.exception_id,
+            shipment_id=shipment_id or session.shipment_id,
+        )
         if not reply:
             reply = "I processed your request using operational tools."
 

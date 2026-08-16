@@ -161,40 +161,124 @@ def log_request_complete(
     )
 
 
-def configure_langsmith_env() -> None:
+_LANGSMITH_CONFIGURED = False
+
+
+def resolve_llm_provider_model() -> tuple[str, str]:
+    """Mirror _build_model selection without constructing a client (openrouter > gemini)."""
+    settings = get_settings()
+    if settings.openrouter_api_key and settings.openrouter_api_key.strip():
+        return "openrouter", settings.openrouter_model
+    if settings.gemini_api_key and settings.gemini_api_key.strip():
+        return "gemini", settings.gemini_model
+    return "none", ""
+
+
+def build_langsmith_run_metadata(
+    *,
+    driver_id: str | None = None,
+    exception_id: str | None = None,
+    shipment_id: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Filterable root metadata for setuhaul_driver_agent (no secrets / prompts / PII blobs)."""
+    settings = get_settings()
+    meta: dict[str, Any] = {}
+    rid = get_request_id()
+    if rid:
+        meta["request_id"] = rid
+    if driver_id:
+        meta["driver_id"] = driver_id
+    if exception_id:
+        meta["exception_id"] = exception_id
+    if shipment_id:
+        meta["shipment_id"] = shipment_id
+    if provider:
+        meta["provider"] = provider
+    if model:
+        meta["model"] = model
+    env = (settings.app_env or "local").strip() or "local"
+    meta["environment"] = env
+    sha = (settings.git_sha or "").strip()
+    if sha:
+        meta["git_sha"] = sha
+    return meta
+
+
+def build_langsmith_run_tags(
+    *,
+    provider: str | None = None,
+    environment: str | None = None,
+) -> list[str]:
+    """Stable, low-cardinality tags for LangSmith filtering."""
+    settings = get_settings()
+    env = (environment or settings.app_env or "local").strip() or "local"
+    tags = ["setuhaul", "agent", env]
+    if provider and provider != "none":
+        tags.append(provider)
+    # De-dupe while preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def configure_langsmith_env(*, force: bool = False) -> None:
     """Enable LangChain/LangSmith auto-tracing when key + LANGSMITH_TRACING=true.
 
-    Sets the env vars LangChain reads before Gemini/tool invokes so LLM and
+    Sets the env vars LangChain reads before model/tool invokes so LLM and
     tool runs appear as a real trace tree (not ad-hoc create_run stubs).
+    Fail-open: never raises to the caller.
     """
-    settings = get_settings()
-    if settings.langsmith_api_key and settings.langsmith_api_key.strip() and settings.langsmith_tracing:
-        os.environ["LANGCHAIN_TRACING_V2"] = "true"
-        os.environ["LANGSMITH_TRACING"] = "true"
-        os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key
-        os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
-        project = settings.langsmith_project or "setuhaul-fde"
-        os.environ["LANGCHAIN_PROJECT"] = project
-        os.environ["LANGSMITH_PROJECT"] = project
-        logger.info("langsmith_tracing_enabled project=%s", project)
-    else:
-        # Explicitly disable so a prior enable in-process cannot leak into tests/fallback.
-        os.environ["LANGCHAIN_TRACING_V2"] = "false"
-        os.environ["LANGSMITH_TRACING"] = "false"
-        logger.debug(
-            "langsmith_tracing_disabled key_present=%s flag=%s",
-            bool(settings.langsmith_api_key and settings.langsmith_api_key.strip()),
-            settings.langsmith_tracing,
-        )
+    global _LANGSMITH_CONFIGURED
+    try:
+        settings = get_settings()
+        if settings.langsmith_api_key and settings.langsmith_api_key.strip() and settings.langsmith_tracing:
+            os.environ["LANGCHAIN_TRACING_V2"] = "true"
+            os.environ["LANGSMITH_TRACING"] = "true"
+            os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key
+            os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
+            project = settings.langsmith_project or "setuhaul-fde"
+            os.environ["LANGCHAIN_PROJECT"] = project
+            os.environ["LANGSMITH_PROJECT"] = project
+            if force or not _LANGSMITH_CONFIGURED:
+                # Never log the API key — project name only.
+                logger.info("langsmith_tracing_enabled project=%s", project)
+            _LANGSMITH_CONFIGURED = True
+        else:
+            # Explicitly disable so a prior enable in-process cannot leak into tests/fallback.
+            os.environ["LANGCHAIN_TRACING_V2"] = "false"
+            os.environ["LANGSMITH_TRACING"] = "false"
+            if force or not _LANGSMITH_CONFIGURED:
+                logger.debug(
+                    "langsmith_tracing_disabled key_present=%s flag=%s",
+                    bool(settings.langsmith_api_key and settings.langsmith_api_key.strip()),
+                    settings.langsmith_tracing,
+                )
+            _LANGSMITH_CONFIGURED = True
+    except Exception:  # noqa: BLE001
+        # Tracing must never break application startup or chat.
+        try:
+            os.environ["LANGCHAIN_TRACING_V2"] = "false"
+            os.environ["LANGSMITH_TRACING"] = "false"
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def langsmith_tracing_enabled() -> bool:
-    settings = get_settings()
-    return bool(
-        settings.langsmith_api_key
-        and settings.langsmith_api_key.strip()
-        and settings.langsmith_tracing
-    )
+    try:
+        settings = get_settings()
+        return bool(
+            settings.langsmith_api_key
+            and settings.langsmith_api_key.strip()
+            and settings.langsmith_tracing
+        )
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def trace_event(name: str, payload: dict[str, Any] | None = None) -> None:
